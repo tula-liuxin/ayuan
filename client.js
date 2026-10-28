@@ -734,7 +734,7 @@ window.__ModuleLoader__.load({
             if (suppressBubbleClick.current) { suppressBubbleClick.current = false; return; }
             void begin();
           },
-        }, h(RobotIcon), '阿源') : null,
+        }, h(RobotIcon)) : null,
         h('section', { ref: panel, className: 'ay-yuan-float' + (wide ? ' ay-yuan-float-wide' : ''), role: 'dialog', 'aria-modal': false, 'aria-label': '阿源浮框',
           style: { display: state.visible ? 'flex' : 'none', left: layout.x, top: layout.y, width: layout.width, height: layout.height, right: 'auto', bottom: 'auto', maxWidth: 'none', maxHeight: 'none' },
           onKeyDown: e => { if (e.key === 'Escape' && !e.defaultPrevented) { floating.set({ visible: false }); e.stopPropagation(); } } },
@@ -823,20 +823,34 @@ window.__ModuleLoader__.load({
     }
 
 
+    function relativeTime(value) {
+      const ms = Date.now() - new Date(value).getTime();
+      if (!Number.isFinite(ms)) return '';
+      const minutes = Math.max(0, Math.floor(ms / 60000));
+      return minutes < 1 ? '刚刚' : minutes < 60 ? minutes + '分钟' : minutes < 1440 ? Math.floor(minutes / 60) + '小时' : Math.floor(minutes / 1440) + '天';
+    }
+
     function YuanHistoryRow({ row, navigate, refresh, onError }) {
       const [menu, setMenu] = useState(false), [editing, setEditing] = useState(false), [name, setName] = useState(row.title || '');
+      const root = useRef(null);
+      useEffect(() => {
+        if (!menu) return;
+        const close = e => { if (e.key === 'Escape' || (e.type === 'pointerdown' && !root.current?.contains(e.target))) { setMenu(false); setEditing(false); } };
+        document.addEventListener('pointerdown', close); document.addEventListener('keydown', close);
+        return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close); };
+      }, [menu]);
       const native = clientService('sessions')?.list?.getSnapshot?.()?.byId?.[row.id];
       const run = async action => { try { await action(); setMenu(false); await refresh(); } catch(e) { onError(e.message); } };
-      return h('div', { className: 'ay-history-item' },
-        h('button', { className: 'ay-history-row', onClick: () => navigate({ sessionId: row.id }) }, h('span', null, native?.displayTitle || row.title), h('small', null, new Date(row.lastActiveAt || row.createdAt).toLocaleString())),
-        h('button', { className: 'ay-yuan-btn', title: '会话操作', 'aria-label': '会话操作', onClick: () => setMenu(!menu) }, '⋯'),
+      return h('div', { ref: root, className: 'ay-history-item' + (menu ? ' is-menu-open' : '') },
+        h('button', { className: 'ay-history-row', onClick: () => navigate({ sessionId: row.id }) }, h('span', { className: 'ay-history-title' }, native?.displayTitle || row.title), h('small', { title: new Date(row.lastActiveAt || row.createdAt).toLocaleString() }, relativeTime(row.lastActiveAt || row.createdAt))),
+        h('button', { className: 'ay-history-more', title: '会话操作', 'aria-label': '会话操作', 'aria-expanded': menu, onClick: () => { setMenu(!menu); setEditing(false); } }, '⋯'),
         menu ? h('div', { className: 'ay-history-actions', role: 'group', 'aria-label': '会话操作' },
-          h('button', { className: 'ay-yuan-btn', onClick: () => copyToClipboard(row.id) }, '复制 ID'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => { copyToClipboard(row.id); setMenu(false); } }, '复制 ID'),
           h('button', { className: 'ay-yuan-btn', onClick: () => { setName(native?.displayTitle || row.title); setEditing(true); } }, '重命名'),
-          h('button', { className: 'ay-yuan-btn', onClick: () => run(() => clientService('uiWorkspace').forkSession(row.id)) }, 'Fork'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => run(() => clientService('uiWorkspace').forkSession(row.id)) }, '创建分支会话'),
           h('button', { className: 'ay-yuan-btn', onClick: () => run(() => clientService('uiWorkspace').pinSession(row.id)) }, '置顶'),
           h('button', { className: 'ay-yuan-btn', onClick: () => run(async () => { await clientService('uiWorkspace').archiveSession(row.id); if (floating.state.sessionId === row.id) floating.set({ sessionId: null }); }) }, '归档'),
-          h('button', { className: 'ay-yuan-btn', onClick: () => { clientService('uiWorkspace').openSession(row.id); floating.set({ visible: false }); } }, '在宿主打开'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => { clientService('uiWorkspace').openSession(row.id); floating.set({ visible: false }); } }, '在主界面打开'),
           editing ? h('form', { onSubmit: e => { e.preventDefault(); void run(async () => {
             const ref = clientService('sessions').retain(row.id, { source: 'controllerOperation' });
             try { const binding = await ref.ready; const result = await binding.session.rename(name); if (!result.ok) throw new Error(result.error?.message || '重命名失败'); setEditing(false); } finally { ref.release(); }
@@ -868,15 +882,21 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ay-yuan-native', ref: root },
         !props.floating ? h('span', { className: 'ay-native-name' }, h(RobotIcon), '阿源') : null,
         h('button', { className: 'ay-yuan-btn', disabled: busy, onClick: () => navigate({ newSession: true }) }, '新会话'),
-        h('button', { className: 'ay-yuan-btn', style: { marginLeft: 'auto', order: 99 }, title: '查看阿源 status 快照', 'aria-label': '查看阿源 status 快照', onClick: async () => { try { const result = await apiJson('/ayuan/api/snapshot'); setSnapshot(result.snapshot); setPanel('快照'); } catch(e) { setError(e.message); } } }, '◉'),
+        h('button', { className: 'ay-yuan-btn', style: { marginLeft: 'auto', order: 99 }, title: '查看阿源 status 快照', 'aria-label': '查看阿源 status 快照', onClick: async () => { try { const result = await apiJson('/ayuan/api/snapshot'); setSnapshot(result.snapshot); setPanel('快照'); } catch(e) { setError(e.message); } } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true }, h('rect', { x: 4, y: 3, width: 16, height: 18, rx: 3 }), h('path', { d: 'M8 8h8M8 12h5M8 16h8' }))),
         ['历史','记忆'].map((name) => h('button', { key: name, className: 'ay-yuan-btn', 'aria-expanded': panel === name, onClick: () => setPanel(panel === name ? '' : name) }, name)),
         context ? h('button', { className: 'ay-context-chip', onClick: () => setPanel(panel === '位置' ? '' : '位置'), title: '将在下一次发言时提供给阿源，10 分钟后过期' }, '来自 ' + (context.title || context.location)) : null,
         error ? h('span', { className: 'ay-native-error', role: 'alert' }, error) : null,
-        panel ? h('section', { className: 'ay-native-popover', 'aria-label': '阿源' + panel },
+        panel ? h('section', { className: 'ay-native-popover ay-native-popover--' + (panel === '历史' ? 'history' : panel === '快照' ? 'snapshot' : 'default'), 'aria-label': '阿源' + panel },
           h('div', { className: 'ay-native-popover-head' }, h('strong', null, panel === '位置' ? '已携带的位置' : '阿源 · ' + panel), h('button', { className: 'ay-yuan-btn', onClick: () => setPanel(''), 'aria-label': '关闭阿源菜单' }, '×')),
-          panel === '历史' ? sessions.map(s => h(YuanHistoryRow, { key: s.id, row: s, navigate, refresh: () => store.load(true), onError: setError })) : null,
-          panel === '快照' ? h('div', { style: { overflowWrap: 'anywhere' } }, h('p', { className: 'ay-native-hint' }, '轻量位置持续更新；正文和图片按需携带。'), snapshot ? h('dl', null,
-            [['当前位置',snapshot.view.title],['面板',snapshot.view.location],['目录',snapshot.view.cwd],['会话 ID',snapshot.view.sessionId],['同时打开',snapshot.view.secondary],['状态',snapshot.view.running ? '运行中' : '空闲'],['更新时间',new Date(snapshot.observedAt).toLocaleString()],['有效性',snapshot.stale ? '已过期，请在主面板操作后重新查看' : '最新']].map(([label,value]) => value ? h(React.Fragment, { key: label }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, label), h('dd', { style: { marginLeft: 0 } }, value)) : null)) : h('p',null,'尚未获取位置，请先点击主面板。')) : null,
+          panel === '历史' ? sessions.length ? sessions.map(s => h(YuanHistoryRow, { key: s.id, row: s, navigate, refresh: () => store.load(true), onError: setError })) : h('p', { className: 'ay-native-empty' }, '暂无历史会话，发送第一条消息后会显示在这里。') : null,
+          panel === '快照' ? snapshot ? h('div', { className: 'ay-snapshot' },
+            h('div', { className: 'ay-snapshot-status' }, h('span', { className: 'ay-snapshot-badge' + (snapshot.stale ? ' is-stale' : '') }, snapshot.stale ? '位置已过期' : '位置已同步'), h('span', null, relativeTime(snapshot.observedAt) + '更新')),
+            h('div', { className: 'ay-snapshot-source' }, h('span', { className: 'ay-snapshot-eyebrow' }, snapshot.view.location || '当前界面'), h('h3', null, snapshot.view.title || '未命名界面'), h('span', { className: 'ay-snapshot-state' }, snapshot.view.running ? '会话运行中' : '会话空闲')),
+            snapshot.view.secondary ? h('div', { className: 'ay-snapshot-field' }, h('span', null, '同时打开'), h('div', null, snapshot.view.secondary)) : null,
+            snapshot.view.cwd ? h('div', { className: 'ay-snapshot-field' }, h('span', null, '工作目录'), h('div', { className: 'ay-snapshot-path' }, snapshot.view.cwd)) : null,
+            snapshot.view.sessionId ? h('div', { className: 'ay-snapshot-field' }, h('span', null, '会话 ID'), h('div', { className: 'ay-snapshot-id' }, h('code', null, snapshot.view.sessionId), h('button', { className: 'ay-yuan-btn', onClick: () => copyToClipboard(snapshot.view.sessionId), title: '复制会话 ID' }, '复制'))) : null,
+            h('p', { className: 'ay-snapshot-footnote' }, '最后同步 ' + new Date(snapshot.observedAt).toLocaleTimeString() + ' · 仅同步位置信息'),
+            h('p', { className: 'ay-native-hint' }, snapshot.stale ? '点击主界面后重新打开快照，即可更新位置。' : '收起时也持续更新。正文与图片仅在需要时读取。')) : h('p', { className: 'ay-native-empty' }, '尚未获取位置，请先点击主界面。') : null,
           panel === '记忆' ? h(MemoryBrowser) : null,
           panel === '位置' ? h('div', null, h('p', { className: 'ay-native-hint' }, '点击入口时的快照；下一次发言时提供，不会自动发送消息。10 分钟后过期。'),
             h('p', null, context?.title || context?.location), h('p', null, context?.selection || context?.page || ''),
@@ -1555,6 +1575,41 @@ window.__ModuleLoader__.load({
 .ay-landing__send:disabled{opacity:.45;cursor:default}
 .ay-landing__error{margin:0;font-size:12px;color:var(--dsw-alias-state-error-primary)}
 .ay-landing__hint{margin:0;font-size:10px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+
+.ay-yuan-bubble{width:42px;height:42px;justify-content:center;padding:3px;gap:0;border-radius:50%;box-shadow:0 3px 14px #00000014;line-height:1}
+.ay-yuan-bubble .ay-yuan-whale{width:30px;height:30px}
+.ay-native-popover--history{padding:12px;width:370px}
+.ay-native-popover--history .ay-native-popover-head{padding:2px 4px 8px;margin-bottom:4px}
+.ay-history-item{position:relative;display:flex;flex-wrap:nowrap;border:0;border-radius:7px;min-height:38px;margin:2px 0;padding-right:4px}
+.ay-history-item:hover,.ay-history-item:focus-within,.ay-history-item.is-menu-open{background:var(--dsw-alias-bg-layer-1)}
+.ay-history-item.is-menu-open{z-index:2;flex-wrap:wrap}
+.ay-history-item>.ay-history-row{padding:9px 8px 9px 12px;gap:12px;min-width:0;background:transparent;border-radius:7px;font-size:13px}
+.ay-history-title{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
+.ay-history-more{border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-secondary);width:26px;height:26px;cursor:pointer;opacity:0;font:inherit;font-size:18px;flex:none}
+.ay-history-item:hover .ay-history-more,.ay-history-item:focus-within .ay-history-more,.ay-history-item.is-menu-open .ay-history-more{opacity:1}
+.ay-history-more:hover{background:var(--dsw-alias-bg-layer-2)}
+.ay-history-actions{margin:0 5px 6px auto;width:190px;display:flex;flex-direction:column;align-items:stretch;gap:2px;padding:5px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-base);box-shadow:0 4px 12px #0000000a}
+.ay-history-actions>.ay-yuan-btn{border:0;background:transparent;text-align:left;padding:6px 9px;border-radius:5px}
+.ay-history-actions>.ay-yuan-btn:hover{background:var(--dsw-alias-bg-layer-1)}
+.ay-history-actions form{flex-wrap:wrap;padding:4px;gap:4px}
+.ay-history-actions input{flex-basis:100%;width:100%;padding:5px;border-radius:4px}
+.ay-native-popover--snapshot{width:380px;padding:16px}
+.ay-snapshot-status{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--dsw-alias-label-tertiary);margin:2px 0 12px}
+.ay-snapshot-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary)}
+.ay-snapshot-badge:before{content:'';width:6px;height:6px;border-radius:50%;background:#37a374}
+.ay-snapshot-badge.is-stale:before{background:#cf963a}
+.ay-snapshot-source{padding:13px 14px;border-radius:10px;background:var(--dsw-alias-bg-layer-1);margin-bottom:14px}
+.ay-snapshot-eyebrow,.ay-snapshot-state{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ay-snapshot-source h3{margin:4px 0;font-size:15px;line-height:1.5;font-weight:600;overflow-wrap:anywhere}
+.ay-snapshot-field{display:grid;grid-template-columns:65px minmax(0,1fr);gap:12px;padding:10px 0;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:12px;overflow-wrap:anywhere}
+.ay-snapshot-field>span{color:var(--dsw-alias-label-tertiary)}
+.ay-snapshot-id{display:flex;align-items:flex-start;gap:6px;min-width:0}
+.ay-snapshot-id code{flex:1;min-width:0;font-size:11px;line-height:1.7;color:var(--dsw-alias-label-secondary)}
+.ay-snapshot-id button{flex:none}
+.ay-snapshot-footnote{font-size:11px;color:var(--dsw-alias-label-tertiary);margin:12px 0 4px}
+.ay-snapshot .ay-native-hint{margin:0;font-size:11px}
+@media(hover:none){.ay-history-more{opacity:1}}
+
 `;
 
     /** Idempotent stylesheet install/remove keyed by a plugin CSS id. */
@@ -1585,18 +1640,6 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'ayuan', order: 50,
         children: { 'ayuan.conversation': { kind: 'single', scope: 'session' } } }, YuanFloatingPanel)), 'ayuan: floating surface');
       ctx.effect(() => ctx.slots.inject('ayuan.conversation', () => ctx.slots.register({ name: 'ayuan.conversation' }, YuanEmbeddedChat)), 'ayuan: embedded native conversation');
-
-      // 会话输入区左侧入口：打开阿源并携带当前位置。
-      ctx.effect(
-        () =>
-          ctx.slots.inject('conversation.input.left', () =>
-            ctx.slots.register(
-              { name: 'conversation.input.left', id: 'ayuan-entry', order: 100, locale: NS },
-              YuanEntry,
-            ),
-          ),
-        'ayuan: entry',
-      );
 
       // 原生会话标题栏工具：新会话 / 历史 / 记忆 / 位置。
       ctx.effect(
