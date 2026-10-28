@@ -28,7 +28,8 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "THIRD-PARTY-NOTICES.txt"
+    "THIRD-PARTY-NOTICES.txt",
+    "CONTRACT.md"
   ],
   "dsh": {
     "bundle": {

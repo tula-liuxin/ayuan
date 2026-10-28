@@ -41,3 +41,12 @@ test('topic names are bounded and avoid credential text', () => {
   assert.equal(topicTitle('  帮我\n整理项目计划 '), '阿源 · 帮我 整理项目计划')
   assert.equal([...topicTitle('🙂'.repeat(30)).split(' · ')[1]].length, 20)
 })
+
+test('non-session navigation replaces stale session context and includes running state', async () => {
+  const page = normalizeOrigin({ location: 'DSH 页面', title: '插件', route: 'plugins' })
+  const description = await describeSourceContext({ origin: page, expiresAt: Date.now() + 10000 }, { sessions() { throw Error('must not query without cwd') } })
+  assert.match(description, /plugins/)
+  assert.match(description, /"id":null/)
+  const session = normalizeOrigin({ sessionId: 'source', running: true, route: 'conversation' })
+  assert.equal(session.running, true)
+})

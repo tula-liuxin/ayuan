@@ -580,7 +580,8 @@ export function apply(ctx, config) {
 
   /* ------------------------------- 中心 HTTP ------------------------------- */
 
-  ctx.inject(['leoHub'], ({ leoHub }) => {
+  ctx.inject(['leoHub'], (scope) => {
+    const { leoHub } = scope
     if (!leoHub || typeof leoHub.registerRoute !== 'function') return
     const centralHandler = async (req, res, pathname, method) => {
       if (typeof pathname !== 'string' || !pathname.startsWith(CENTRAL_PREFIX)) return false
@@ -599,7 +600,7 @@ export function apply(ctx, config) {
       }
       return true
     }
-    leoHub.registerRoute(CENTRAL_PREFIX, centralHandler)
+    scope.effect(() => leoHub.registerRoute(CENTRAL_PREFIX, centralHandler), 'ayuan: central routes')
     log('central routes registered ·', CENTRAL_PREFIX)
   })
 

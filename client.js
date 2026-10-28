@@ -552,10 +552,11 @@ window.__ModuleLoader__.load({
     // Only the selected excerpt / visible content is sampled, never the whole DOM or draft.
 
     function captureOrigin(props = {}) {
-      const sessionId = props.sessionId || [...document.querySelectorAll('[data-conversation-session]')].find(n => !n.closest('.ay-yuan-float'))?.dataset.conversationSession || null;
+      const sessionId = props.panelId ? null : props.sessionId || [...document.querySelectorAll('[data-conversation-session]')].find(n => !n.closest('.ay-yuan-float'))?.dataset.conversationSession || null;
       const row = sessionId ? clientService('sessions')?.list?.getSnapshot?.()?.byId?.[sessionId] : null;
-      const origin = { sessionId, cwd: row?.cwd || props.cwd || '', location: props.location || (sessionId ? 'DSH 会话' : 'Leo 待办'),
-        title: row?.displayTitle || row?.title || (sessionId ? '当前会话' : 'Leo 待办'),
+      const origin = { sessionId, cwd: row?.cwd || props.cwd || '', location: props.location || (sessionId ? 'DSH 会话' : document.querySelector('.ls-page') ? 'Leo 待办' : 'DSH 页面'),
+        route: props.panelId || 'conversation', running: row?.running === true,
+        title: row?.displayTitle || row?.title || (sessionId ? '当前会话' : props.panelId || document.title),
         selection: String(window.getSelection?.() || '').slice(0, 1800) };
       const root = document.querySelector('.ls-page') || [...document.querySelectorAll('[data-conversation-content]')].find(n => !n.closest('.ay-yuan-float')) || document.querySelector('main') || document.querySelector('[role="main"]');
       if (!root) return origin;
@@ -583,7 +584,7 @@ window.__ModuleLoader__.load({
       return value;
     }
     async function openYuan(options = {}) {
-      if (options.newSession && floating.state.source && !options.origin) options = { ...options, origin: captureOrigin(floating.state.source) };
+      if (options.newSession && floating.state.source && !options.origin) options = { ...options, origin: captureOrigin() };
       const result = await apiJson('/ayuan/api/open', { method: 'POST', body: options });
       if (result.remote) throw new Error('阿源位于中心设备，请在设备中心切换到中心设备后打开原生会话');
       yuan.set({ state: { ...(yuan.state || {}), sessions: result.sessions, context: result.context, contextSessionId: result.sessionId, mode: result.mode || null } });
@@ -632,7 +633,9 @@ window.__ModuleLoader__.load({
       }, { slots: { views: YuanChatView } });
     }
 
-    function YuanFloatingPanel({ SessionProvider, renderSlot }) {
+    function YuanFloatingPanel({ SessionProvider, renderSlot, usePanelInfo, useSessions }) {
+      const panelId = usePanelInfo(info => info.activePanelId);
+      const mainSession = useSessions(snapshot => Object.values(snapshot.byId).find(row => (row.retainedBy.mainView || 0) > 0));
       const state = useFloating();
       const store = useYuanStore();
       const identity = store.state?.mode === 'hub' ? '中心设备 · 记忆在中心'
@@ -662,6 +665,16 @@ window.__ModuleLoader__.load({
         window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize);
       }, []);
       useEffect(() => { if (!bubblePos) return; try { localStorage.setItem(BUBBLE_POSITION_KEY, JSON.stringify(bubblePos)); } catch {} }, [bubblePos]);
+      // Follow host navigation via its subscriptions; never poll or wake an agent.
+      useEffect(() => {
+        if (!state.visible || !state.sessionId || (!panelId && mainSession?.id === state.sessionId)) return;
+        let alive = true;
+        const timer = setTimeout(() => {
+          const origin = captureOrigin({ panelId, sessionId: panelId ? null : mainSession?.id });
+          void openYuan({ sessionId: state.sessionId, origin }).catch(e => { if (alive) setError(e.message); });
+        }, 200);
+        return () => { alive = false; clearTimeout(timer); };
+      }, [state.visible, state.sessionId, panelId, mainSession?.id, mainSession?.title, mainSession?.running]);
       const begin = async () => {
         if (state.sessionId) { floating.set({ visible: true }); return; }
         try { await openYuan({ origin: captureOrigin() }); }
@@ -669,7 +682,7 @@ window.__ModuleLoader__.load({
       };
       const updateOrigin = () => {
         const main = [...document.querySelectorAll('[data-conversation-session]')].find(n => !n.closest('.ay-yuan-float'));
-        const origin = captureOrigin(main ? { sessionId: main.dataset.conversationSession } : { location: document.querySelector('.ls-page') ? 'Leo 待办' : state.source?.location });
+        const origin = captureOrigin({ panelId, sessionId: panelId ? null : main?.dataset.conversationSession });
         void openYuan({ sessionId: state.sessionId, origin }).catch(e => setError(e.message));
       };
       return h(React.Fragment, null,
