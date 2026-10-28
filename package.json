@@ -27,7 +27,8 @@
     "client.js",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "THIRD-PARTY-NOTICES.txt"
   ],
   "dsh": {
     "bundle": {
