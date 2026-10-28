@@ -552,9 +552,9 @@ window.__ModuleLoader__.load({
     // Only the selected excerpt / visible content is sampled, never the whole DOM or draft.
 
     function captureOrigin(props = {}) {
-      const sessionId = props.sessionId || null;
+      const sessionId = props.sessionId || [...document.querySelectorAll('[data-conversation-session]')].find(n => !n.closest('.ay-yuan-float'))?.dataset.conversationSession || null;
       const row = sessionId ? clientService('sessions')?.list?.getSnapshot?.()?.byId?.[sessionId] : null;
-      const origin = { sessionId, location: props.location || (sessionId ? 'DSH 会话' : 'Leo 待办'),
+      const origin = { sessionId, cwd: row?.cwd || props.cwd || '', location: props.location || (sessionId ? 'DSH 会话' : 'Leo 待办'),
         title: row?.displayTitle || row?.title || (sessionId ? '当前会话' : 'Leo 待办'),
         selection: String(window.getSelection?.() || '').slice(0, 1800) };
       const root = document.querySelector('.ls-page') || [...document.querySelectorAll('[data-conversation-content]')].find(n => !n.closest('.ay-yuan-float')) || document.querySelector('main') || document.querySelector('[role="main"]');

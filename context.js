@@ -1,13 +1,29 @@
 /** A click carries a small, sourced snapshot. It never sends a user turn. */
 import { createHash } from 'node:crypto'
 import { sensitive } from './memory.js'
+import path from 'node:path'
 
 const text = (value) => String(value ?? '').replace(/\s+/g, ' ').trim()
 const clip = (v, n) => typeof v === 'string' ? v.trim().slice(0, n) : ''
+/** Bounded context from the captured source, never from the assistant workspace. */
+export async function describeSourceContext(source, browser) {
+  if (!source || source.expiresAt <= Date.now()) return ''
+  const origin = source.origin
+  if (!origin?.sessionId) return ''
+  let siblings = []
+  if (origin.cwd && browser) {
+    try { siblings = await browser.sessions({ cwd: origin.cwd, excludeId: origin.sessionId, limit: 4 }) } catch {}
+  }
+  return [
+    '【来源会话（入口捕获，非实时追踪）】' + JSON.stringify({ id: origin.sessionId, title: clip(origin.title, 120), cwd: clip(origin.cwd, 300), at: origin.at }),
+    siblings.length ? '【同目录其它会话，仅标题；细节用 ayuan_sessions】' + JSON.stringify(siblings.map(s => ({ id: s.id, title: clip(s.title, 80) }))) : '',
+  ].filter(Boolean).join('\n').slice(0, 900)
+}
 export function normalizeOrigin(input = {}) {
   const value = {
     location: clip(input.location, 120) || 'DSH', title: clip(input.title, 180),
-    sessionId: /^session-[\w-]+$/.test(input.sessionId || '') ? input.sessionId : null,
+    sessionId: /^[\w-]{1,160}$/.test(input.sessionId || '') ? input.sessionId : null,
+    cwd: clip(input.cwd, 500),
     selection: clip(input.selection, 1800), code: clip(input.code, 1000),
     page: clip(input.page, 1000), at: new Date().toISOString(),
   }
@@ -22,6 +38,7 @@ export async function prepareOrigin(input, { persistence, attachments, targetId 
     try {
       const snapshot = (await persistence.list()).find((s) => s.header.id === origin.sessionId)
       if (snapshot) {
+        origin.cwd = clip(snapshot.header.cwd, 500)
         handle = await persistence.open(origin.sessionId, 'read')
         const { events } = await handle.read(Math.max(handle.inheritedEventCount || 0, (snapshot.eventCount || 0) - 120), 120)
         origin.recent = events.filter((e) => (e.type === 'user/message' && e.data?.source?.kind === 'user') || e.type === 'assistant/message')
@@ -55,10 +72,13 @@ export function createSessionBrowser({ getQuery, log = () => {}, maxSessions = 1
     return query
   }
   const mainOnly = (record) => (record?.header?.delegationDepth ?? 0) === 0 && record?.header?.origin !== 'subagent'
-  async function list({ limit = maxSessions, filter = '' } = {}) {
+  async function list({ limit = maxSessions, filter = '', cwd = '', excludeId = '' } = {}) {
     const query = await engine()
     const size = Math.max(1, Math.min(40, Number(limit) || maxSessions))
-    const records = (await query.listSessions()).filter(mainOnly).slice(0, Math.max(size * 3, 30))
+    const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value)
+    const records = (await query.listSessions()).filter(mainOnly)
+      .filter(record => record.header.id !== excludeId && (!cwd || (record.header.cwd && pathKey(record.header.cwd) === pathKey(cwd))))
+      .sort((a, b) => Number(b.header.createdAt || 0) - Number(a.header.createdAt || 0))
     let titleOf = new Map()
     try {
       const results = await query.readTitleSnapshots(records.map((record) => record.header.id))
@@ -96,7 +116,7 @@ export function createSessionBrowser({ getQuery, log = () => {}, maxSessions = 1
       messages.push({ seq: doc.seq, at: new Date(doc.time).toISOString(), role: doc.type === 'user/message' ? 'user' : 'assistant', text: piece })
       if (used >= budget) break
     }
-    return { id, title: text(title?.value?.title?.title), messages, truncated: chat.length > messages.length }
+    return { id, title: text(title?.title?.title ?? title?.value?.title?.title), messages, truncated: chat.length > messages.length }
   }
   return { list, read }
 }
@@ -119,6 +139,7 @@ export function sessionsToolDefinition(get) {
       action: { type: 'string', enum: ['list', 'read'], description: 'list 列表，read 读取一个会话' },
       id: { type: 'string', description: 'read 必填：会话 id（来自 list）' },
       query: { type: 'string', description: 'list 可选：按标题/目录过滤' },
+      cwd: { type: 'string', description: 'list 可选：只列出该工作目录的会话' },
       limit: { type: 'number', description: 'list 默认 12 条；read 默认 40 条消息' },
     }, required: ['action'], additionalProperties: false },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
@@ -126,7 +147,7 @@ export function sessionsToolDefinition(get) {
       const context = get('ayuanContext')
       if (!context) throw new Error('会话服务未就绪')
       const action = String(args.action || '')
-      if (action === 'list') return JSON.stringify({ sessions: await context.sessions({ limit: args.limit, filter: args.query || '' }) })
+      if (action === 'list') return JSON.stringify({ sessions: await context.sessions({ limit: args.limit, filter: args.query || '', cwd: args.cwd }) })
       if (action !== 'read') throw new Error('只支持 list 或 read')
       return JSON.stringify(await context.session(args.id, { limit: args.limit }))
     },
@@ -155,7 +176,7 @@ export function apply(ctx, config) {
     async sessions(options = {}) {
       await whenReady()
       if (!browser) throw new Error('会话服务未就绪')
-      return browser.list({ limit: options?.limit, filter: options?.filter || '' })
+      return browser.list({ limit: options?.limit, filter: options?.filter || '', cwd: options?.cwd, excludeId: options?.excludeId })
     },
     async session(id, options = {}) {
       await whenReady()

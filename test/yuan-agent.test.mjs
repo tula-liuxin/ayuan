@@ -53,7 +53,9 @@ test('native new/history sessions keep selected models, capture human evidence a
     async resume(options) { resumes.push(options); const agent = make(options.resumeSessionId); live.set(agent.id, agent); return { agent, dispose() {} } } }
   const memory = { search: () => [{ id: 'm', text: '中文解释', kind: 'preference' }], async capture(r) { captured.push(r) } }
   const workspaceRegistry = { archivedSessionIds: [], async create(cwd) { assert.equal(cwd, path.join(dir, 'yuan', 'workspace')); return { async attachSession(id) { if (!workspaceSessions.includes(id)) workspaceSessions.push(id) } } } }
-  const ctx = { on, get: (name) => ({ agents, workspaceRegistry })[name] }
+  const renamed = []
+  const sessionTitle = { rename(session, title) { renamed.push({ id: session.id, title }) } }
+  const ctx = { on, get: (name) => ({ agents, workspaceRegistry, sessionTitle })[name] }
   let runtime = createYuanAgentRuntime({ ctx, dataDir: dir, memory, getModel: () => ({ provider: 'initial', model: 'default' }) })
   t.after(async () => { await runtime.dispose(); await rm(dir, { recursive: true, force: true }) })
   const first = await runtime.open({ origin: { location: '待办', selection: '仅有关选中内容' } })
@@ -69,9 +71,12 @@ test('native new/history sessions keep selected models, capture human evidence a
   const hook = [...listeners.get('agent/pre-step')][0]
   const run = (messages) => hook({ agent }, async () => ({ kind: 'enter', messages }))
   const prepared = await run([direct])
+  assert.deepEqual(renamed, [{ id: first.sessionId, title: '阿源 · 我希望代码解释使用中文' }])
+  assert.equal((await runtime.sessions()).find(s => s.id === first.sessionId).title, renamed[0].title)
   assert.equal(prepared.messages.length, 2)
   assert.ok(prepared.messages[1].content.some((b) => b.text?.includes('仅有关选中内容')))
   assert.equal((await run([direct])).messages[1].content.some((b) => b.text?.includes('仅有关选中内容')), false)
+  assert.equal(renamed.length, 1)
   assert.equal((await run([])).messages.length, 0)
   for (const fn of listeners.get('session/event')) {
     fn(agent.session, { type: 'user/message', seq: 2, data: direct })
