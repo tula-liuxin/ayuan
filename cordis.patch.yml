@@ -1,0 +1,16 @@
+- insert:
+    - id: ayuan-ui
+      name: ayuan
+      config: {}
+    - id: ayuan
+      name: cordis:group
+      group: true
+      config:
+        - id: ayuan-memory
+          name: ayuan/memory
+        - id: ayuan-status
+          name: ayuan/status
+        - id: ayuan-context
+          name: ayuan/context
+        - id: ayuan-tools
+          name: ayuan/tools
