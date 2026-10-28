@@ -34,15 +34,15 @@ export function createBoardBridge(ctx) {
   }
 }
 
+export function ayuanToolDefinitions(get) {
+  return [memoryToolDefinition(get), ...statusToolDefinitions(get), sessionsToolDefinition(get)]
+}
+
 /** ayuan/tools 入口：注册壳。 */
 export function apply(ctx, config) {
   ctx.inject(['tools'], ({ tools }) => {
     const get = (name) => service(ctx, name)
-    const definitions = [
-      memoryToolDefinition(get),
-      ...statusToolDefinitions(get),
-      sessionsToolDefinition(get),
-    ]
+    const definitions = ayuanToolDefinitions(get)
     for (const definition of definitions) {
       ctx.effect(() => tools.register(definition), `ayuan: ${definition.name} tool`)
     }

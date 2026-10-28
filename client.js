@@ -551,14 +551,26 @@ window.__ModuleLoader__.load({
     // Capture on pointer-down: clicking a control may otherwise collapse selection.
     // Only the selected excerpt / visible content is sampled, never the whole DOM or draft.
 
-    function captureOrigin(props = {}) {
+    let lastMainTarget = null;
+    function captureOrigin(props = {}, details = true) {
       const sessionId = props.panelId ? null : props.sessionId || [...document.querySelectorAll('[data-conversation-session]')].find(n => !n.closest('.ay-yuan-float'))?.dataset.conversationSession || null;
       const row = sessionId ? clientService('sessions')?.list?.getSnapshot?.()?.byId?.[sessionId] : null;
       const origin = { sessionId, cwd: row?.cwd || props.cwd || '', location: props.location || (sessionId ? 'DSH 会话' : document.querySelector('.ls-page') ? 'Leo 待办' : 'DSH 页面'),
         route: props.panelId || 'conversation', running: row?.running === true,
         title: row?.displayTitle || row?.title || (sessionId ? '当前会话' : props.panelId || document.title),
-        selection: String(window.getSelection?.() || '').slice(0, 1800) };
-      const root = document.querySelector('.ls-page') || [...document.querySelectorAll('[data-conversation-content]')].find(n => !n.closest('.ay-yuan-float')) || document.querySelector('main') || document.querySelector('[role="main"]');
+        selection: details ? String(window.getSelection?.() || '').slice(0, 1800) : '' };
+      const target = lastMainTarget?.isConnected && !lastMainTarget.closest('[hidden],[aria-hidden="true"]') ? lastMainTarget : null;
+      const rightPane = target?.closest('[data-sidebar-right-session] [data-dockkit-pane], [data-sidebar-right-session] [data-dockkit-float]');
+      const pane = target?.closest('[data-conversation-session],main,[role=main],[role=tabpanel]');
+      const selectedSession = pane?.closest('[data-conversation-session]')?.dataset.conversationSession;
+      if (selectedSession) { const selected = clientService('sessions')?.list?.getSnapshot?.()?.byId?.[selectedSession]; Object.assign(origin, { sessionId: selectedSession, title: selected?.displayTitle || selected?.title || origin.title, cwd: selected?.cwd || '', location: 'DSH 会话', route: 'conversation' }); }
+      if (rightPane) {
+        const tab = rightPane.querySelector('[role="tab"][aria-selected="true"], [data-dockkit-float-title]');
+        Object.assign(origin, { location: 'DSH 右侧面板', route: 'sidebar.right', title: (tab?.textContent || '文件 / 面板').trim().slice(0,180) });
+      }
+      origin.secondary = [...document.querySelectorAll('[role=tab][aria-selected=true]')].filter(n => !n.closest('.ay-yuan-float')).map(n => n.textContent).join(' · ').slice(0,240);
+      if (!details) return origin;
+      const root = rightPane || document.querySelector('.ls-page') || [...document.querySelectorAll('[data-conversation-content]')].find(n => !n.closest('.ay-yuan-float')) || document.querySelector('main') || document.querySelector('[role="main"]');
       if (!root) return origin;
       origin.page = [...root.querySelectorAll('h1,h2,[role="tab"][aria-selected="true"]')].slice(0, 5).map((n) => n.textContent).join(' · ').slice(0, 350);
       const visible = (node) => { const r = node.getBoundingClientRect(); return r.width > 80 && r.height > 60 && r.top < innerHeight && r.bottom > 0 && r.left < innerWidth && r.right > 0; };
@@ -584,11 +596,15 @@ window.__ModuleLoader__.load({
       return value;
     }
     async function openYuan(options = {}) {
+      if (!options.sessionId && !options.commit) {
+        floating.set({ sessionId: null, visible: true, source: options.origin || floating.state.source, pendingNew: options.newSession === true });
+        return { draft: true };
+      }
       if (options.newSession && floating.state.source && !options.origin) options = { ...options, origin: captureOrigin() };
       const result = await apiJson('/ayuan/api/open', { method: 'POST', body: options });
       if (result.remote) throw new Error('阿源位于中心设备，请在设备中心切换到中心设备后打开原生会话');
       yuan.set({ state: { ...(yuan.state || {}), sessions: result.sessions, context: result.context, contextSessionId: result.sessionId, mode: result.mode || null } });
-      floating.set({ sessionId: result.sessionId, visible: true, ...(options.origin ? { source: options.origin } : {}) });
+      if (!options.deferDisplay) floating.set({ sessionId: result.sessionId, visible: true, ...(options.origin ? { source: options.origin } : {}) });
       return result;
     }
 
@@ -665,16 +681,20 @@ window.__ModuleLoader__.load({
         window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize);
       }, []);
       useEffect(() => { if (!bubblePos) return; try { localStorage.setItem(BUBBLE_POSITION_KEY, JSON.stringify(bubblePos)); } catch {} }, [bubblePos]);
-      // Follow host navigation via its subscriptions; never poll or wake an agent.
+      // Metadata only: no model request, disk write, history scan or image capture.
       useEffect(() => {
-        if (!state.visible || !state.sessionId || (!panelId && mainSession?.id === state.sessionId)) return;
-        let alive = true;
-        const timer = setTimeout(() => {
-          const origin = captureOrigin({ panelId, sessionId: panelId ? null : mainSession?.id });
-          void openYuan({ sessionId: state.sessionId, origin }).catch(e => { if (alive) setError(e.message); });
-        }, 200);
-        return () => { alive = false; clearTimeout(timer); };
-      }, [state.visible, state.sessionId, panelId, mainSession?.id, mainSession?.title, mainSession?.running]);
+        let timer;
+        lastMainTarget = null;
+        const update = () => { clearTimeout(timer); timer = setTimeout(() => {
+          const origin = captureOrigin({ panelId, sessionId: panelId ? null : mainSession?.id }, false);
+          floating.set({ source: origin });
+          void apiJson('/ayuan/api/snapshot/update', { method: 'POST', body: origin }).catch(() => {});
+        }, 180); };
+        const track = e => { if (e.target.closest?.('.ay-yuan-float,.ay-yuan-bubble,.ay-yuan-launch')) return; lastMainTarget = e.target; update(); };
+        document.addEventListener('pointerdown', track, true); document.addEventListener('focusin', track, true);
+        const heartbeat = setInterval(update, 30000); update();
+        return () => { clearTimeout(timer); clearInterval(heartbeat); document.removeEventListener('pointerdown', track, true); document.removeEventListener('focusin', track, true); };
+      }, [panelId, mainSession?.id, mainSession?.displayTitle, mainSession?.running]);
       const begin = async () => {
         if (state.sessionId) { floating.set({ visible: true }); return; }
         try { await openYuan({ origin: captureOrigin() }); }
@@ -683,7 +703,9 @@ window.__ModuleLoader__.load({
       const updateOrigin = () => {
         const main = [...document.querySelectorAll('[data-conversation-session]')].find(n => !n.closest('.ay-yuan-float'));
         const origin = captureOrigin({ panelId, sessionId: panelId ? null : main?.dataset.conversationSession });
-        void openYuan({ sessionId: state.sessionId, origin }).catch(e => setError(e.message));
+        floating.set({ source: origin });
+        void apiJson('/ayuan/api/snapshot/update', { method: 'POST', body: origin }).catch(e => setError(e.message));
+        if (state.sessionId) void openYuan({ sessionId: state.sessionId, origin }).catch(e => setError(e.message));
       };
       return h(React.Fragment, null,
         !state.visible ? h('button', {
@@ -729,7 +751,15 @@ window.__ModuleLoader__.load({
             h('button', { className: 'ay-yuan-btn', onClick: () => floating.set({ visible: false }), 'aria-label': '收起阿源' }, '收起')),
           h(YuanNativeTools, { sessionId: state.sessionId, floating: true }),
           error ? h('p', { role: 'alert', className: 'ay-native-error' }, error) : null,
-          h('div', { className: 'ay-yuan-float-body' }, reference?.sessionId === state.sessionId ? h(SessionProvider, { session: reference }, renderSlot('ayuan.conversation', {})) : h('p', null, '正在连接阿源…')),
+          h('div', { className: 'ay-yuan-float-body' }, !state.visible ? null : !state.sessionId ? h(AyLanding, { t: boundT, onSend: async prompt => {
+            const result = await openYuan({ commit: true, deferDisplay: true, newSession: floating.state.pendingNew === true, origin: captureOrigin() });
+            const ref = clientService('sessions').retain(result.sessionId, { source: 'leoYuanFloat' });
+            try { const binding = await ref.ready; const outcome = await binding.session.prompt([{ type: 'text', text: prompt }], 'queue'); if (!outcome.ok) throw new Error(outcome.error?.message || '发送失败'); floating.set({ sessionId: result.sessionId, visible: true, pendingNew: false }); }
+            finally { ref.release(); }
+          } }) : !panelId && mainSession?.id === state.sessionId ? h('div', { className: 'ay-landing' }, h('p', null, '主界面同步显示此对话'), h(AyLanding, { t: boundT, compact: true, onSend: async prompt => {
+            await reference.ready; const result = await reference.binding.session.prompt([{ type: 'text', text: prompt }], 'queue');
+            if (!result.ok) throw new Error(result.error?.message || '发送失败');
+          } })) : reference?.sessionId === state.sessionId ? h(SessionProvider, { session: reference }, renderSlot('ayuan.conversation', {})) : h('p', null, '正在连接阿源…')),
           h('footer', { className: 'ay-yuan-float-foot' }, '拖动标题栏移动 · 右下角缩放'),
           h('button', { className: 'ay-yuan-resize', 'aria-label': '调整浮框大小', title: '拖动调整大小；方向键微调',
             onPointerDown: e => { e.preventDefault(); e.currentTarget.focus(); sizing.current = { startX: e.clientX, startY: e.clientY, ...layout }; e.currentTarget.setPointerCapture(e.pointerId); },
@@ -793,7 +823,28 @@ window.__ModuleLoader__.load({
     }
 
 
+    function YuanHistoryRow({ row, navigate, refresh, onError }) {
+      const [menu, setMenu] = useState(false), [editing, setEditing] = useState(false), [name, setName] = useState(row.title || '');
+      const native = clientService('sessions')?.list?.getSnapshot?.()?.byId?.[row.id];
+      const run = async action => { try { await action(); setMenu(false); await refresh(); } catch(e) { onError(e.message); } };
+      return h('div', { className: 'ay-history-item' },
+        h('button', { className: 'ay-history-row', onClick: () => navigate({ sessionId: row.id }) }, h('span', null, native?.displayTitle || row.title), h('small', null, new Date(row.lastActiveAt || row.createdAt).toLocaleString())),
+        h('button', { className: 'ay-yuan-btn', title: '会话操作', 'aria-label': '会话操作', onClick: () => setMenu(!menu) }, '⋯'),
+        menu ? h('div', { className: 'ay-history-actions', role: 'group', 'aria-label': '会话操作' },
+          h('button', { className: 'ay-yuan-btn', onClick: () => copyToClipboard(row.id) }, '复制 ID'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => { setName(native?.displayTitle || row.title); setEditing(true); } }, '重命名'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => run(() => clientService('uiWorkspace').forkSession(row.id)) }, 'Fork'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => run(() => clientService('uiWorkspace').pinSession(row.id)) }, '置顶'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => run(async () => { await clientService('uiWorkspace').archiveSession(row.id); if (floating.state.sessionId === row.id) floating.set({ sessionId: null }); }) }, '归档'),
+          h('button', { className: 'ay-yuan-btn', onClick: () => { clientService('uiWorkspace').openSession(row.id); floating.set({ visible: false }); } }, '在宿主打开'),
+          editing ? h('form', { onSubmit: e => { e.preventDefault(); void run(async () => {
+            const ref = clientService('sessions').retain(row.id, { source: 'controllerOperation' });
+            try { const binding = await ref.ready; const result = await binding.session.rename(name); if (!result.ok) throw new Error(result.error?.message || '重命名失败'); setEditing(false); } finally { ref.release(); }
+          }); } }, h('input', { value: name, 'aria-label': '会话名称', onChange: e => setName(e.target.value) }), h('button', { type: 'submit', className: 'ay-yuan-btn' }, '保存'), h('button', { type: 'button', className: 'ay-yuan-btn', onClick: () => setEditing(false) }, '取消')) : null) : null);
+    }
+
     function YuanNativeTools(props) {
+      const [snapshot, setSnapshot] = useState(null);
       const store = useYuanStore(), [panel, setPanel] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false);
       const root = useRef(null);
       useEffect(() => { store.load(); }, [props.sessionId]);
@@ -808,7 +859,8 @@ window.__ModuleLoader__.load({
         document.addEventListener('pointerdown', close); document.addEventListener('keydown', close);
         return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close); };
       }, [panel]);
-      const sessions = store.state?.sessions || [];
+      const rows = clientService('sessions')?.list?.getSnapshot?.()?.byId || {};
+      const sessions = (store.state?.sessions || []).filter(s => rows[s.id]?.blank !== true && (rows[s.id] ? rows[s.id].blank === false : s.topicNamed === true));
       if (!props.floating && !sessions.some((s) => s.id === props.sessionId)) return null;
       const context = store.state?.contextSessionId === props.sessionId ? store.state?.context : null;
       const navigate = async (options) => { setBusy(true); setError(''); try { await openYuan(options); setPanel(''); }
@@ -816,13 +868,15 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ay-yuan-native', ref: root },
         !props.floating ? h('span', { className: 'ay-native-name' }, h(RobotIcon), '阿源') : null,
         h('button', { className: 'ay-yuan-btn', disabled: busy, onClick: () => navigate({ newSession: true }) }, '新会话'),
+        h('button', { className: 'ay-yuan-btn', style: { marginLeft: 'auto', order: 99 }, title: '查看阿源 status 快照', 'aria-label': '查看阿源 status 快照', onClick: async () => { try { const result = await apiJson('/ayuan/api/snapshot'); setSnapshot(result.snapshot); setPanel('快照'); } catch(e) { setError(e.message); } } }, '◉'),
         ['历史','记忆'].map((name) => h('button', { key: name, className: 'ay-yuan-btn', 'aria-expanded': panel === name, onClick: () => setPanel(panel === name ? '' : name) }, name)),
         context ? h('button', { className: 'ay-context-chip', onClick: () => setPanel(panel === '位置' ? '' : '位置'), title: '将在下一次发言时提供给阿源，10 分钟后过期' }, '来自 ' + (context.title || context.location)) : null,
         error ? h('span', { className: 'ay-native-error', role: 'alert' }, error) : null,
         panel ? h('section', { className: 'ay-native-popover', 'aria-label': '阿源' + panel },
           h('div', { className: 'ay-native-popover-head' }, h('strong', null, panel === '位置' ? '已携带的位置' : '阿源 · ' + panel), h('button', { className: 'ay-yuan-btn', onClick: () => setPanel(''), 'aria-label': '关闭阿源菜单' }, '×')),
-          panel === '历史' ? sessions.map((s) => h('button', { key: s.id, className: 'ay-history-row', disabled: busy, onClick: () => navigate({ sessionId: s.id }) },
-            h('span', null, clientService('sessions')?.list?.getSnapshot?.()?.byId?.[s.id]?.displayTitle || s.title), h('small', null, new Date(s.lastActiveAt || s.createdAt).toLocaleString()))) : null,
+          panel === '历史' ? sessions.map(s => h(YuanHistoryRow, { key: s.id, row: s, navigate, refresh: () => store.load(true), onError: setError })) : null,
+          panel === '快照' ? h('div', { style: { overflowWrap: 'anywhere' } }, h('p', { className: 'ay-native-hint' }, '轻量位置持续更新；正文和图片按需携带。'), snapshot ? h('dl', null,
+            [['当前位置',snapshot.view.title],['面板',snapshot.view.location],['目录',snapshot.view.cwd],['会话 ID',snapshot.view.sessionId],['同时打开',snapshot.view.secondary],['状态',snapshot.view.running ? '运行中' : '空闲'],['更新时间',new Date(snapshot.observedAt).toLocaleString()],['有效性',snapshot.stale ? '已过期，请在主面板操作后重新查看' : '最新']].map(([label,value]) => value ? h(React.Fragment, { key: label }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, label), h('dd', { style: { marginLeft: 0 } }, value)) : null)) : h('p',null,'尚未获取位置，请先点击主面板。')) : null,
           panel === '记忆' ? h(MemoryBrowser) : null,
           panel === '位置' ? h('div', null, h('p', { className: 'ay-native-hint' }, '点击入口时的快照；下一次发言时提供，不会自动发送消息。10 分钟后过期。'),
             h('p', null, context?.title || context?.location), h('p', null, context?.selection || context?.page || ''),
@@ -1160,12 +1214,14 @@ window.__ModuleLoader__.load({
 
 
     /** 阿源自己的新会话着陆页；发出第一条消息后交回宿主原生 composer。 */
-    function AyLanding({ t, actions, onSubmitted }) {
+    function AyLanding({ t, actions, onSubmitted, onSend, compact = false }) {
       const [text, setText] = useState('');
       const [failure, setFailure] = useState('');
-      const send = (value) => {
+      const [sending, setSending] = useState(false);
+      const send = async (value) => {
         const prompt = String(value === undefined ? text : value).trim();
-        if (prompt === '') return;
+        if (prompt === '' || sending) return;
+        if (onSend) { setSending(true); try { await onSend(prompt); setText(''); setFailure(''); } catch(e) { setFailure(e.message); } finally { setSending(false); } return; }
         if (actions === undefined || actions === null) { setFailure(t('landingNoComposer')); return; }
         try {
           actions.setDraft(prompt);
@@ -1179,19 +1235,19 @@ window.__ModuleLoader__.load({
       };
       const chips = [t('landingChip1'), t('landingChip2'), t('landingChip3'), t('landingChip4')];
       return h('div', { className: 'ay-landing' },
-        h('div', { className: 'ay-landing__mark' }, h(RobotIcon)),
-        h('h2', { className: 'ay-landing__title' }, t('landingTitle')),
-        h('p', { className: 'ay-landing__body' }, t('landingBody')),
-        h('div', { className: 'ay-landing__chips' }, chips.map((chip, index) => h('button', {
+        !compact ? h('div', { className: 'ay-landing__mark' }, h(RobotIcon)) : null,
+        !compact ? h('h2', { className: 'ay-landing__title' }, t('landingTitle')) : null,
+        !compact ? h('p', { className: 'ay-landing__body' }, t('landingBody')) : null,
+        !compact ? h('div', { className: 'ay-landing__chips' }, chips.map((chip, index) => h('button', {
           key: 'chip-' + index, type: 'button', className: 'ay-landing__chip', onClick: () => send(chip),
-        }, chip))),
+        }, chip))) : null,
         h('div', { className: 'ay-landing__composer' },
           h('textarea', {
             className: 'ay-landing__input', rows: 2, value: text, placeholder: t('landingPlaceholder'), 'aria-label': t('landingPlaceholder'),
             onChange: (event) => setText(event.target.value),
-            onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } },
+            onKeyDown: (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !event.nativeEvent?.isComposing && event.keyCode !== 229) { event.preventDefault(); send(); } },
           }),
-          h('button', { type: 'button', className: 'ay-landing__send', disabled: text.trim() === '', onClick: () => send() }, t('landingSend'))),
+          h('button', { type: 'button', className: 'ay-landing__send', disabled: sending || text.trim() === '', onClick: () => send() }, t('landingSend'))),
         failure !== '' ? h('p', { className: 'ay-landing__error', role: 'alert' }, failure) : null,
         h('p', { className: 'ay-landing__hint' }, t('landingHint')));
     }
@@ -1456,6 +1512,7 @@ window.__ModuleLoader__.load({
 .ay-memory-row p{margin:8px 0;white-space:pre-wrap;line-height:1.65}
 .ay-memory-row details{font-size:12px;color:var(--dsw-alias-label-secondary);margin:8px 0}
 .ay-memory-row summary{cursor:pointer}
+.ay-history-item{display:flex;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--dsw-alias-border-l1)}.ay-history-item>.ay-history-row{flex:1;min-width:0;border:0}.ay-history-actions{width:100%;display:flex;flex-wrap:wrap;gap:4px;padding:6px}.ay-history-actions form{display:flex;width:100%;gap:4px}.ay-history-actions input{min-width:0;flex:1;background:var(--dsw-alias-bg-base);color:inherit;border:1px solid var(--dsw-alias-border-l2)}
 .ay-memory-row blockquote{margin:8px 0;padding:8px 12px;border-left:2px solid var(--dsw-alias-border-l2);white-space:pre-wrap}
 .ay-memory-edit{width:100%;min-height:90px;resize:vertical;font:inherit;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:inherit}
 .ay-search__input{height:36px;border-radius:8px}
@@ -1475,7 +1532,7 @@ window.__ModuleLoader__.load({
 .ay-yuan-float-identity{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
 .ay-yuan-float-identity strong{font-size:16px}.ay-yuan-float-identity span{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ay-yuan-float>.ay-yuan-native{padding:0 12px 10px;border:0;border-bottom:1px solid var(--dsw-alias-border-l1);border-radius:0;cursor:default;flex:none;background:transparent}
-.ay-yuan-float-body{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.ay-yuan-float-body{--dsh-content-font-size:11.9px;--dsh-content-font-delta:-2.1px;font-size:11.9px;flex:1;min-height:0;display:flex;flex-direction:column;position:relative;overflow:hidden}
 .ay-yuan-float-body>[data-conversation-content]{flex:1;min-height:0;--dsh-chat-user-width:100%;--dsh-chat-content-padding:16px}
 .ay-yuan-float .ay-native-popover{position:absolute;top:92px;right:12px;max-height:calc(100% - 110px);max-width:calc(100% - 24px);z-index:10}
 .ay-yuan-bubble{position:fixed;right:24px;bottom:24px;pointer-events:auto;display:flex;align-items:center;gap:8px;padding:12px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 6px 24px #0002;cursor:grab;touch-action:none;user-select:none;z-index:120}

@@ -190,7 +190,7 @@ export function apply(ctx, config) {
   }
 
   const service = {
-    async status(options = {}) { await whenReady(); return state ? state.status({ refresh: options?.refresh === true }) : null },
+    async status(options = {}) { await whenReady(); return state ? { ...await state.status({ refresh: options?.refresh === true }), snapshot: getService(ctx, 'ayuanContext')?.snapshot?.() || null } : null },
     invalidate() { try { state?.invalidate?.() } catch {} },
     async signals() {
       await whenReady()

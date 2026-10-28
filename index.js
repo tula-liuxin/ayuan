@@ -24,13 +24,13 @@ export const PLUGIN_VERSION = '2.0.0'
 
 const LOCAL_PREFIX = '/ayuan/api'
 const CENTRAL_PREFIX = '/api/yuan/'
-const READ_ROUTES = new Set(['state', 'signals', 'activity', 'sessions'])
-const LOCAL_ONLY = new Set(['open', 'sessions', 'chat', 'activity', 'stop'])
+const READ_ROUTES = new Set(['state', 'signals', 'activity', 'sessions', 'snapshot'])
+const LOCAL_ONLY = new Set(['open', 'sessions', 'chat', 'activity', 'stop', 'snapshot', 'snapshot/update'])
 const methodOf = (route) => (READ_ROUTES.has(route) ? 'GET' : 'POST')
 
 const LOCAL_ROUTES = [
   ['state', 'GET'], ['signals', 'GET'], ['activity', 'GET'], ['sessions', 'GET'],
-  ['open', 'POST'], ['chat', 'POST'], ['stop', 'POST'],
+  ['open', 'POST'], ['chat', 'POST'], ['stop', 'POST'], ['snapshot', 'GET'], ['snapshot/update', 'POST'],
   ['memory/query', 'POST'], ['memory/change', 'POST'], ['memory/remove', 'POST'],
   ['remember', 'POST'], ['reminder', 'POST'], ['reminder/done', 'POST'], ['seen', 'POST'],
 ]
@@ -441,6 +441,8 @@ export function apply(ctx, config) {
   }
 
   const operations = {
+    snapshot: () => ({ ok: true, snapshot: service('ayuanContext')?.snapshot?.() || null }),
+    'snapshot/update': body => ({ ok: true, snapshot: service('ayuanContext')?.updateSnapshot?.(body || {}) || null }),
     state: () => yuanState(),
     signals: () => yuanSignals(),
     activity: async () => ({ ok: true, activity: await agentActivity() }),

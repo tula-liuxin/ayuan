@@ -5,6 +5,23 @@ import path from 'node:path'
 
 const text = (value) => String(value ?? '').replace(/\s+/g, ' ').trim()
 const clip = (v, n) => typeof v === 'string' ? v.trim().slice(0, n) : ''
+/** Lightweight device-local observation; never persists or starts an agent. */
+export function createViewSnapshot({ now = () => Date.now() } = {}) {
+  let value = null, signature = ''
+  return {
+    update(input = {}) {
+      const normalized = normalizeOrigin(input)
+      for (const key of ['selection', 'code', 'page', 'at']) delete normalized[key]
+      normalized.secondary = clip(input.secondary, 240)
+      const next = JSON.stringify(normalized), at = new Date(now()).toISOString()
+      value = { schemaVersion: 1, revision: (value?.revision || 0) + (next !== signature ? 1 : 0),
+        observedAt: at, changedAt: next !== signature ? at : value.changedAt, view: normalized }
+      signature = next
+      return this.get()
+    },
+    get() { return value ? { ...value, view: { ...value.view }, stale: now() - Date.parse(value.observedAt) > 120000 } : null },
+  }
+}
 /** Bounded context from the captured source, never from the assistant workspace. */
 export async function describeSourceContext(source, browser) {
   if (!source || source.expiresAt <= Date.now()) return ''
@@ -106,17 +123,19 @@ export function createSessionBrowser({ getQuery, log = () => {}, maxSessions = 1
     ])
     const messages = []
     let used = 0
+    let clipped = false
     const chat = docs.filter((doc) => doc.type === 'user/message' || doc.type === 'assistant/message')
     for (const doc of chat.slice(-size)) {
       const body = text(doc.text)
       if (!body) continue
-      const piece = body.slice(0, Math.max(120, budget - used))
+      const piece = body.slice(0, Math.max(0, budget - used))
+      if (piece.length < body.length) clipped = true
       if (piece === '') break
       used += piece.length
       messages.push({ seq: doc.seq, at: new Date(doc.time).toISOString(), role: doc.type === 'user/message' ? 'user' : 'assistant', text: piece })
       if (used >= budget) break
     }
-    return { id, title: text(title?.title?.title ?? title?.value?.title?.title), messages, truncated: chat.length > messages.length }
+    return { id, title: text(title?.title?.title ?? title?.value?.title?.title), messages, truncated: clipped || chat.length > messages.length }
   }
   return { list, read }
 }
@@ -172,7 +191,10 @@ export function apply(ctx, config) {
     return initPromise
   }
 
+  const snapshot = createViewSnapshot()
   const service = {
+    snapshot: () => snapshot.get(),
+    updateSnapshot: (input) => snapshot.update(input),
     async sessions(options = {}) {
       await whenReady()
       if (!browser) throw new Error('会话服务未就绪')
