@@ -617,18 +617,20 @@ window.__ModuleLoader__.load({
         y: Math.max(40, Math.min(Number.isFinite(layout?.y) ? layout.y : innerHeight - height - 24, innerHeight - height - 8)) };
     }
     function readFloatLayout() { try { return clampFloat(JSON.parse(localStorage.getItem(FLOAT_LAYOUT_KEY))); } catch { return clampFloat(null); } }
-    /** Collapsed launcher keeps its own absolute position; null means the CSS default corner. */
-    const BUBBLE_POSITION_KEY = 'ayuan.bubble-position.v1';
-    function readBubblePosition() {
-      try {
-        const value = JSON.parse(localStorage.getItem(BUBBLE_POSITION_KEY));
-        return Number.isFinite(value?.x) && Number.isFinite(value?.y) ? clampBubble(value) : null;
-      } catch { return null; }
+    // Store relative position once; resizing only changes its projection.
+    const BUBBLE_POSITION_KEY = 'ayuan.bubble-position.v2';
+    const clampUnit = n => Math.max(0, Math.min(1, Number(n) || 0));
+    function bubbleSize() { return window.matchMedia?.('(pointer:coarse)').matches ? 44 : 42; }
+    function savedBubble(position, snap=false) {
+      const size=bubbleSize(),x=Math.max(0,Math.min(position.x,innerWidth-size)),y=Math.max(40,Math.min(position.y,innerHeight-size-8));
+      return {rx:clampUnit((x-8)/Math.max(1,innerWidth-size-16)),ry:clampUnit((y-40)/Math.max(1,innerHeight-size-48)),dock:snap?(x<28?'left':x>innerWidth-size-28?'right':null):null};
     }
-    function clampBubble(position) {
-      const w = Math.max(48, Number(position?.w) || 96), h = Math.max(32, Number(position?.h) || 44);
-      return { x: Math.max(8, Math.min(Number(position?.x) || 0, innerWidth - w - 8)),
-        y: Math.max(8, Math.min(Number(position?.y) || 0, innerHeight - h - 8)), w, h };
+    function readBubblePosition() { try { const p=JSON.parse(localStorage.getItem(BUBBLE_POSITION_KEY));if(Number.isFinite(p?.rx)&&Number.isFinite(p?.ry))return p;const old=JSON.parse(localStorage.getItem('ayuan.bubble-position.v1'));return Number.isFinite(old?.x)&&Number.isFinite(old?.y)?savedBubble(old):null } catch {return null} }
+    function projectBubble(position, expanded=false) {
+      const size=bubbleSize(),p=position||{rx:1,ry:1},dock=['left','right'].includes(p.dock)?p.dock:null;
+      const y=Math.max(40,Math.min(innerHeight-size-8,40+clampUnit(p.ry)*Math.max(1,innerHeight-size-48)));
+      const x=dock==='left'?(expanded?8:-size/2):dock==='right'?(expanded?innerWidth-size-8:innerWidth-size/2):position?8+clampUnit(p.rx)*Math.max(0,innerWidth-size-16):innerWidth-size-24;
+      return {x,y:position?y:innerHeight-size-24,width:size,height:size,dock,expanded};
     }
 
     function YuanChatView(props) {
@@ -661,11 +663,16 @@ window.__ModuleLoader__.load({
       const [reference, setReference] = useState(null), [error, setError] = useState('');
       const [geometry, setGeometry] = useState(readFloatLayout), [wide, setWide] = useState(false), [, setViewport] = useState(0);
       const [bubblePos, setBubblePos] = useState(readBubblePosition);
+      const [dockExpanded,setDockExpanded]=useState(false), dockTimer=useRef();
+      const revealDock = () => { clearTimeout(dockTimer.current);setDockExpanded(true); };
+      const hideDock = () => { clearTimeout(dockTimer.current);dockTimer.current=setTimeout(()=>setDockExpanded(false),600); };
+      const bubblePoint=projectBubble(bubblePos,dockExpanded);
+      useEffect(()=>{const reveal=e=>e.detail?.active?revealDock():hideDock();const move=e=>{const p=e.detail;if(Number.isFinite(p?.x)&&Number.isFinite(p?.y))setBubblePos(savedBubble(p,!!p.end));};window.addEventListener('leo-quick:dock-reveal-v1',reveal);window.addEventListener('leo-quick:launcher-move-v1',move);return()=>{clearTimeout(dockTimer.current);window.removeEventListener('leo-quick:dock-reveal-v1',reveal);window.removeEventListener('leo-quick:launcher-move-v1',move);};},[]);
       useEffect(() => {
-        const publish = () => { const p = bubblePos || { x: window.innerWidth - 66, y: window.innerHeight - 66 }; window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', { detail: { visible: !state.visible, panelOpen: !!state.visible, x: p.x, y: p.y, width: 42, height: 42 } })); };
+        const publish = () => { const p = projectBubble(bubblePos,dockExpanded); window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', { detail: { visible: !state.visible, panelOpen: !!state.visible, ...p } })); };
         window.addEventListener('leo-quick:anchor-request-v1', publish); window.addEventListener('resize', publish); publish();
         return () => { window.removeEventListener('leo-quick:anchor-request-v1', publish); window.removeEventListener('resize', publish); };
-      }, [bubblePos, state.visible]);
+      }, [bubblePos, state.visible, dockExpanded]);
       useEffect(() => () => { window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', {detail:{visible:false,panelOpen:false}})); }, []);
 
       const [settingsOpen, setSettingsOpen] = useState(false);
@@ -688,7 +695,7 @@ window.__ModuleLoader__.load({
         else opener.current?.focus?.();
       }, [state.visible]);
       useEffect(() => {
-        const onResize = () => { setViewport(n => n + 1); setBubblePos(current => (current ? clampBubble(current) : current)); };
+        const onResize = () => { setViewport(n => n + 1); };
         window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize);
       }, []);
       useEffect(() => { if (!bubblePos) return; try { localStorage.setItem(BUBBLE_POSITION_KEY, JSON.stringify(bubblePos)); } catch {} }, [bubblePos]);
@@ -721,7 +728,8 @@ window.__ModuleLoader__.load({
       return h(React.Fragment, null,
         !state.visible ? h('button', {
           type: 'button', className: 'ay-yuan-bubble', title: '展开阿源（可拖动）', 'aria-label': '展开阿源',
-          style: bubblePos ? { left: bubblePos.x, top: bubblePos.y, right: 'auto', bottom: 'auto' } : undefined,
+          style: { left: bubblePoint.x, top: bubblePoint.y, width:bubblePoint.width,height:bubblePoint.height, right: 'auto', bottom: 'auto' },
+          onPointerEnter:revealDock,onPointerLeave:hideDock,onFocus:revealDock,onBlur:hideDock,
           onPointerDown: e => {
             if (e.button !== 0) return;
             const rect = e.currentTarget.getBoundingClientRect();
@@ -733,10 +741,10 @@ window.__ModuleLoader__.load({
             if (!start) return;
             if (!start.moved && Math.hypot(e.clientX - start.startX, e.clientY - start.startY) < 4) return;
             start.moved = true;
-            setBubblePos(clampBubble({ x: e.clientX - start.dx, y: e.clientY - start.dy, w: start.w, h: start.h }));
+            start.last={x:e.clientX-start.dx,y:e.clientY-start.dy};setBubblePos(savedBubble(start.last));
           },
           onPointerUp: () => {
-            if (bubbleDrag.current?.moved) { suppressBubbleClick.current = true; setTimeout(() => { suppressBubbleClick.current = false; }, 0); }
+            if (bubbleDrag.current?.moved) { setBubblePos(savedBubble(bubbleDrag.current.last,true));hideDock();suppressBubbleClick.current = true; setTimeout(() => { suppressBubbleClick.current = false; }, 0); }
             bubbleDrag.current = null;
           },
           onPointerCancel: () => { bubbleDrag.current = null; },
