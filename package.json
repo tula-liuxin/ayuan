@@ -1,7 +1,7 @@
 {
   "name": "ayuan",
-  "version": "2.0.2",
-  "private": true,
+  "version": "2.0.3",
+  "private": false,
   "type": "module",
   "description": "阿源：跨设备共享记忆与状态的 DSH 助手。独立浮框、真实 Agent 会话、可追溯记忆和有来源的页面上下文。",
   "exports": {
@@ -37,7 +37,10 @@
     },
     "client": {
       "platform": "web",
-      "immediately": true
+      "immediately": true,
+      "external": [
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
     }
   },
   "engines": {

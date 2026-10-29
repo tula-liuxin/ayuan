@@ -97,7 +97,7 @@ test('native new/history sessions keep selected models, capture human evidence a
 
 test('native workspace sessions acquire Yuan identity and exclusive context tool before first request, including resume', async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'leo-identity-'))
-  const listeners = new Map(), permissions = [], approvals = []
+  const listeners = new Map(), permissions = [], approvals = [], modelBindings = []
   const make = (id, cwd) => {
     const prompts = new Map(), tools = new Map()
     return { id, prompts, tools, session: { id, header: { cwd }, ownEvents: () => [] }, ctx: {
@@ -107,7 +107,7 @@ test('native workspace sessions acquire Yuan identity and exclusive context tool
   }
   const existing = make('native-yuan', path.join(dir, 'yuan', 'workspace'))
   const unrelated = make('ordinary-session', os.tmpdir())
-  const services = { agents: { list: () => [existing, unrelated], get: () => existing, create() {} },
+  const services = { sessionController: { agents: { installSelection(agent) { modelBindings.push(agent.id) } } }, agents: { list: () => [existing, unrelated], get: () => existing, create() {} },
     permissionPresets: { set(session, value) { permissions.push([session.id, value]) } },
     approval: { setPolicy(agent, value) { approvals.push([agent.id, value]) } } }
   const runtime = createYuanAgentRuntime({ dataDir: dir, ctx: { get: n => services[n], on(n, fn) { listeners.set(n, fn); return () => listeners.delete(n) } } })
@@ -116,6 +116,7 @@ test('native workspace sessions acquire Yuan identity and exclusive context tool
   assert.match(existing.prompts.get('leo-yuan-persona').text, /你是「阿源」/)
   assert.equal(existing.tools.has('yuan_context'), true)
   assert.equal(unrelated.prompts.size, 0); assert.equal(unrelated.tools.size, 0)
+  assert.deepEqual(modelBindings, ['native-yuan'])
   assert.deepEqual(permissions, [['native-yuan', 'danger-full-access']])
   assert.deepEqual(approvals, [['native-yuan', 'never']])
   await runtime.open({ sessionId: existing.id, origin: { title: '代码审阅', code: 'const proof = 47' } })
@@ -124,5 +125,6 @@ test('native workspace sessions acquire Yuan identity and exclusive context tool
   const resumed = make(existing.id, path.join(dir, 'yuan', 'workspace'))
   await listeners.get('agent/created')({ agent: resumed })
   assert.match(resumed.prompts.get('leo-yuan-persona').text, /独立浮框/)
+  assert.deepEqual(modelBindings, ['native-yuan', 'native-yuan'])
   assert.equal((await runtime.sessions()).filter(s => s.id === existing.id).length, 1)
 })

@@ -162,6 +162,14 @@ export function createYuanAgentRuntime({ ctx, dataDir, log = () => {}, getModel 
   function attach(current) {
     if (attached.get(current.id) === current) return
     attached.set(current.id, current)
+    // Agents created directly by Yuan bypass the native Session controller's setup.
+    // Let the controller install its own session-local model selection, preserving
+    // the last-used or explicitly selected model and the native switch behavior.
+    const sessionAgents = ctx.get('sessionController')?.agents
+    if (typeof sessionAgents?.installSelection === 'function') {
+      try { sessionAgents.installSelection(current) }
+      catch (error) { log('yuan-agent: native model selection setup failed:', error?.message ?? error) }
+    }
     if (current.ctx.tools?.register) for (const definition of ayuanToolDefinitions(name => ctx.get(name))) {
       if (!current.ctx.tools.get?.(definition.name)) cleanups.push(current.ctx.tools.register(definition))
     }
