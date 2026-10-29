@@ -11,7 +11,11 @@ window.__ModuleLoader__.load({
   factory(require) {
 
     const React = require('react');
-    const { Menu, IconEllipsisOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives');
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives');
+    const { Menu, IconEllipsisOutlineRegular } = primitives;
+    // HoverCard / StateDot 与宿主左侧会话行同源；未来版本若调整导出，缺省时降级为无悬停卡片。
+    const HoverCard = primitives.HoverCard;
+    const StateDot = primitives.StateDot;
     const h = React.createElement;
     const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
@@ -589,6 +593,37 @@ window.__ModuleLoader__.load({
     }
 
 
+    /**
+     * 宿主用 completionUnread 标记「后台跑完、还没在主界面看过」的会话（左侧会话行的小圆点）。
+     * 阿源浮框不是主界面，读过的会话不会自动清除；这里在浮框显示该会话时替宿主标记为已读。
+     * 宿主没有公开 API，按当前客户端实现做特性检测；实现变化时静默降级（不崩，只是点可能还在）。
+     */
+    /** 宿主当前的正文基准字号（px）；百分比设置以它为 100%，跟随 DSH 字号设置。 */
+    function hostContentFontSize() {
+      try {
+        const raw = getComputedStyle(document.body).getPropertyValue('--dsh-content-font-size');
+        const value = parseFloat(raw);
+        return Number.isFinite(value) && value >= 10 && value <= 22 ? value : 14;
+      } catch {
+        return 14;
+      }
+    }
+
+    function markFloatSessionRead(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return;
+      try {
+        const uiSession = clientService('uiSession');
+        const unread = uiSession?.completionUnread;
+        if (!(unread instanceof Set) || !unread.has(sessionId)) return;
+        // 没有发布能力时别只删集合，否则状态快照会停在旧值。
+        if (typeof uiSession.publishStatus !== 'function') return;
+        unread.delete(sessionId);
+        uiSession.publishStatus();
+      } catch {
+        /* 宿主内部实现变了：保持原样 */
+      }
+    }
+
     const floating = { state: { sessionId: null, visible: false, source: null }, listeners: new Set(),
       set(value) { this.state = { ...this.state, ...value }; for (const listener of this.listeners) listener(this.state); } };
     function useFloating() {
@@ -596,9 +631,57 @@ window.__ModuleLoader__.load({
       useEffect(() => { floating.listeners.add(setValue); setValue(floating.state); return () => floating.listeners.delete(setValue); }, []);
       return value;
     }
+    /**
+     * 新会话欢迎页使用一个真实的空白阿源会话，正文与输入框都交给宿主原生 Composer：
+     * 语音输入等输入区插件贡献的控件会自动出现，不需要插件逐个适配。
+     */
+    let draftOpening = null;
+    /** 等宿主会话列表至少完成一次拉取，避免冷启动时把「还没到位」误判成「没有空白会话」。 */
+    async function readySessionList() {
+      const store = clientService('sessions')?.list;
+      if (!store || typeof store.getSnapshot !== 'function') return null;
+      let snapshot = store.getSnapshot();
+      const deadline = Date.now() + 1200;
+      while (snapshot !== undefined && snapshot !== null && snapshot.phase !== 'ready' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        snapshot = store.getSnapshot();
+      }
+      return snapshot;
+    }
+    async function openDraftYuan(options = {}) {
+      if (draftOpening !== null) return draftOpening;
+      const origin = options.origin || captureOrigin();
+      draftOpening = (async () => {
+        let state = yuan.state;
+        if (state === null) state = await yuan.load().catch(() => null);
+        if (state === null && yuan.loading === true) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          state = yuan.state;
+        }
+        const list = await readySessionList();
+        const rows = list?.byId || {};
+        // 主界面正在显示的空白会话不要抢：否则浮框会走「同会话双开」分支，又回到没有原生输入区。
+        const blank = (state?.sessions || []).find((item) => {
+          const row = item?.id ? rows[item.id] : undefined;
+          return row?.blank === true && (row.retainedBy?.mainView || 0) === 0;
+        });
+        if (blank) {
+          try {
+            const result = await openYuan({ sessionId: blank.id, origin });
+            if (result?.sessionId !== blank.id) throw new Error('空白会话打开失败，请再试一次');
+            return result;
+          } catch (error) {
+            console.warn('[ayuan] blank session open failed; creating a new one', error);
+          }
+        }
+        return openYuan({ newSession: true, origin });
+      })();
+      try { return await draftOpening; } finally { draftOpening = null; }
+    }
     async function openYuan(options = {}) {
-      if (!options.sessionId && !options.commit) {
-        floating.set({ sessionId: null, visible: true, source: options.origin || floating.state.source, pendingNew: options.newSession === true });
+      if (options.draft === true) return openDraftYuan(options);
+      if (!options.sessionId && !options.commit && !options.newSession) {
+        floating.set({ sessionId: null, visible: true, source: options.origin || floating.state.source });
         return { draft: true };
       }
       if (options.newSession && floating.state.source && !options.origin) options = { ...options, origin: captureOrigin() };
@@ -644,12 +727,20 @@ window.__ModuleLoader__.load({
     function YuanEmbeddedChat(props) {
       const t = typeof props.t === 'function' ? props.t : boundT;
       const session = typeof props.useSession === 'function' ? props.useSession((snapshot) => snapshot) : undefined;
-      const [submitted, setSubmitted] = useState(false);
-      const blank = submitted !== true && session !== undefined && session !== null && session.blank === true;
-      if (blank) return h(AyLanding, { t, actions: props.inputActions, onSubmitted: () => setSubmitted(true) });
+      // 空白会话不再自绘输入框：欢迎内容占正文区，输入框用宿主原生 Composer，
+      // 这样语音输入等输入区插件会随宿主自动出现，也不会把首条消息写进上一个会话。
+      // 只有已加载的会话快照才认定为空白；快照未就绪时沿用普通会话视图，避免历史会话闪一下欢迎页。
+      const blank = session !== undefined && session !== null && session.blank === true && session.openState !== 'loading';
+      const onSend = typeof props.onSend === 'function' ? props.onSend : undefined;
+      const views = useMemo(() => {
+        if (!blank) return YuanChatView;
+        return function YuanBlankView() {
+          return h(AyLanding, { t, welcomeOnly: true, onSend });
+        };
+      }, [blank, onSend, t]);
       return props.renderFactorySlot('conversation.content', {
         variant: 'embedded', phase: session !== undefined && session !== null && session.openState === 'loading' ? 'settling' : 'active', hero: false,
-      }, { slots: { views: YuanChatView } });
+      }, { slots: { views } });
     }
 
     function YuanFloatingPanel({ SessionProvider, renderSlot, renderFactorySlot, usePanelInfo, useSessions }) {
@@ -661,6 +752,14 @@ window.__ModuleLoader__.load({
         : store.state?.mode === 'device' ? '本机运行 · 记忆同步中心'
         : '独立记忆 · 全权限';
       const [reference, setReference] = useState(null), [error, setError] = useState('');
+      // 稳定引用，避免每次 render 换 onSend 导致欢迎页子树重挂、chip 发送状态丢失。
+      const sendDraftMessage = useCallback(async (prompt) => {
+        const text = String(prompt === undefined ? '' : prompt).trim();
+        if (text === '' || reference === null) return;
+        await reference.ready;
+        const result = await reference.binding.session.prompt([{ type: 'text', text }], 'queue');
+        if (!result.ok) throw new Error(result.error?.message || '发送失败');
+      }, [reference]);
       const [geometry, setGeometry] = useState(readFloatLayout), [wide, setWide] = useState(false), [, setViewport] = useState(0);
       const [bubblePos, setBubblePos] = useState(readBubblePosition);
       const [dockExpanded,setDockExpanded]=useState(false), dockTimer=useRef();
@@ -676,6 +775,7 @@ window.__ModuleLoader__.load({
       useEffect(() => () => { window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', {detail:{visible:false,panelOpen:false}})); }, []);
 
       const [settingsOpen, setSettingsOpen] = useState(false);
+      const baseFontSize = hostContentFontSize();
       const [fontSizes, setFontSizes] = useState(() => { try { const saved = JSON.parse(localStorage.getItem('ayuan.font-sizes')); return { interface: [85,90,95,100].includes(saved?.interface) ? saved.interface : 95, reply: [75,80,85,90,100].includes(saved?.reply) ? saved.reply : 80 }; } catch { return { interface: 95, reply: 80 }; } });
       const updateFont = (key, value) => setFontSizes(old => { const next = { ...old, [key]: Number(value) }; try { localStorage.setItem('ayuan.font-sizes', JSON.stringify(next)); } catch {} return next; });
       const panel = useRef(null), drag = useRef(null), sizing = useRef(null), opener = useRef(null), previousSize = useRef(null);
@@ -694,6 +794,16 @@ window.__ModuleLoader__.load({
         if (state.visible) opener.current = document.activeElement;
         else opener.current?.focus?.();
       }, [state.visible]);
+      // 浮框正在显示这个会话就算读过：清掉宿主左侧会话行的「后台完成未读」圆点，
+      // 并在这个会话下一次后台跑完时继续清（订阅宿主状态源）。
+      useEffect(() => {
+        if (!state.visible || !state.sessionId) return undefined;
+        const sessionId = state.sessionId;
+        markFloatSessionRead(sessionId);
+        const status = clientService('uiSession')?.sessionStatus;
+        if (!status || typeof status.subscribe !== 'function') return undefined;
+        return status.subscribe(() => markFloatSessionRead(sessionId));
+      }, [state.visible, state.sessionId]);
       useEffect(() => {
         const onResize = () => { setViewport(n => n + 1); };
         window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize);
@@ -715,8 +825,12 @@ window.__ModuleLoader__.load({
       }, [panelId, mainSession?.id, mainSession?.displayTitle, mainSession?.running]);
       const begin = async () => {
         if (state.sessionId) { floating.set({ visible: true }); return; }
-        try { await openYuan({ origin: captureOrigin() }); }
+        const origin = captureOrigin();
+        // 先显示浮框，再在后台准备空白会话（创建/恢复 Agent 可能需要一点时间）。
+        floating.set({ visible: true, opening: true, source: origin });
+        try { await openYuan({ draft: true, origin }); }
         catch (error) { setError(error !== null && typeof error === 'object' && typeof error.message === 'string' ? error.message : String(error)); }
+        finally { floating.set({ opening: false }); }
       };
       const updateOrigin = () => {
         const main = [...document.querySelectorAll('[data-conversation-session]')].find(n => !n.closest('.ay-yuan-float'));
@@ -769,18 +883,18 @@ window.__ModuleLoader__.load({
             h('button', { className: 'ay-yuan-btn', onClick: () => { if (!wide) { previousSize.current = geometry; setGeometry(clampFloat({ width: 940, height: 850 })); } else setGeometry(previousSize.current || clampFloat(null)); setWide(!wide); }, 'aria-label': wide ? '缩小浮框' : '放大浮框' }, wide ? '↙' : '↗'),
             h('button', { className: 'ay-yuan-btn ay-header-icon', onClick: () => setSettingsOpen(v => !v), title: '阿源设置', 'aria-label': '阿源设置', 'aria-expanded': settingsOpen }, h('svg', {width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.7,'aria-hidden':true}, h('circle',{cx:12,cy:12,r:3}), h('path',{d:'M9.7 3.2 10.3 2h3.4l.6 1.2.3 1.4 1.2.5 1.2-.8 1.3-.4 2.4 2.4-.4 1.3-.8 1.2.5 1.2 1.4.3 1.2.6v3.4l-1.2.6-1.4.3-.5 1.2.8 1.2.4 1.3-2.4 2.4-1.3-.4-1.2-.8-1.2.5-.3 1.4-.6 1.2h-3.4l-.6-1.2-.3-1.4-1.2-.5-1.2.8-1.3.4-2.4-2.4.4-1.3.8-1.2-.5-1.2-1.4-.3L2 13.7v-3.4l1.2-.6 1.4-.3.5-1.2-.8-1.2-.4-1.3 2.4-2.4 1.3.4 1.2.8 1.2-.5z',strokeLinejoin:'round'}))),
             h('button', { className: 'ay-yuan-btn ay-header-icon', onClick: () => floating.set({ visible: false }), title: '收起阿源', 'aria-label': '收起阿源' }, h('svg', {width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.8,'aria-hidden':true}, h('path',{d:'M5 12h14'})))),
-          settingsOpen ? h('section', {className:'ay-settings', 'aria-label':'阿源设置'}, h('div', {className:'ay-settings-head'}, h('strong',null,'阿源设置'), h('button',{className:'ay-yuan-btn',onClick:()=>setSettingsOpen(false),'aria-label':'关闭设置'},'×')), h('p',null,'浮框字号'), [['interface','输入和界面文字',[85,90,95,100]],['reply','阿源回复正文',[75,80,85,90,100]]].map(([key,label,choices])=>h('label',{key},h('span',null,label),h('select',{value:fontSizes[key],onChange:e=>updateFont(key,e.target.value)},choices.map(n=>h('option',{key:n,value:n},n+'%'))))), h('small',null,'设置保存在此设备。')) : null,
+          settingsOpen ? h('section', {className:'ay-settings', 'aria-label':'阿源设置'}, h('div', {className:'ay-settings-head'}, h('strong',null,'阿源设置'), h('button',{className:'ay-yuan-btn',onClick:()=>setSettingsOpen(false),'aria-label':'关闭设置'},'×')), h('p',null,'浮框字号'), [['interface','输入和界面文字',[85,90,95,100]],['reply','阿源回复正文',[75,80,85,90,100]]].map(([key,label,choices])=>h('label',{key},h('span',null,label),h('select',{value:fontSizes[key],onChange:e=>updateFont(key,e.target.value)},choices.map(n=>h('option',{key:n,value:n},n+'%'))))), h('div',{className:'ay-settings-preview','aria-hidden':true},h('span',{style:{fontSize:(baseFontSize*fontSizes.interface/100)+'px'}},'输入和界面文字 '+fontSizes.interface+'%'),h('span',{style:{fontSize:(baseFontSize*fontSizes.reply/100)+'px'}},'阿源回复正文 '+fontSizes.reply+'%')), h('small',null,'设置保存在此设备，改动即时生效。')) : null,
           h(YuanNativeTools, { sessionId: state.sessionId, floating: true, renderFactorySlot }),
           error ? h('p', { role: 'alert', className: 'ay-native-error' }, error) : null,
-          h('div', { className: 'ay-yuan-float-body', style: { '--ay-interface-font': (14 * fontSizes.interface / 100) + 'px', '--ay-interface-delta': (14 * fontSizes.interface / 100 - 14) + 'px', '--ay-reply-font': (14 * fontSizes.reply / 100) + 'px', '--ay-reply-delta': (14 * fontSizes.reply / 100 - 14) + 'px' } }, !state.visible ? null : !state.sessionId ? h(AyLanding, { t: boundT, onSend: async prompt => {
-            const result = await openYuan({ commit: true, deferDisplay: true, newSession: floating.state.pendingNew === true, origin: captureOrigin() });
+          h('div', { className: 'ay-yuan-float-body', style: { '--ay-interface-font': (baseFontSize * fontSizes.interface / 100) + 'px', '--ay-interface-delta': (baseFontSize * fontSizes.interface / 100 - baseFontSize) + 'px', '--ay-reply-font': (baseFontSize * fontSizes.reply / 100) + 'px', '--ay-reply-delta': (baseFontSize * fontSizes.reply / 100 - baseFontSize) + 'px' } }, !state.visible ? null : state.opening && !state.sessionId ? h('div', { className: 'ay-landing' }, h('div', { className: 'ay-landing__mark' }, h(RobotIcon)), h('p', { className: 'ay-landing__hint' }, '正在打开阿源…')) : !state.sessionId ? h(AyLanding, { t: boundT, onSend: async prompt => {
+            const result = await openYuan({ commit: true, deferDisplay: true, newSession: true, origin: captureOrigin() });
             const ref = clientService('sessions').retain(result.sessionId, { source: 'leoYuanFloat' });
-            try { const binding = await ref.ready; const outcome = await binding.session.prompt([{ type: 'text', text: prompt }], 'queue'); if (!outcome.ok) throw new Error(outcome.error?.message || '发送失败'); floating.set({ sessionId: result.sessionId, visible: true, pendingNew: false }); }
+            try { const binding = await ref.ready; const outcome = await binding.session.prompt([{ type: 'text', text: prompt }], 'queue'); if (!outcome.ok) throw new Error(outcome.error?.message || '发送失败'); floating.set({ sessionId: result.sessionId, visible: true }); }
             finally { ref.release(); }
           } }) : !panelId && mainSession?.id === state.sessionId ? h(AyLanding, { t: boundT, sameSession: true, onSend: async prompt => {
             await reference.ready; const result = await reference.binding.session.prompt([{ type: 'text', text: prompt }], 'queue');
             if (!result.ok) throw new Error(result.error?.message || '发送失败');
-          } }) : reference?.sessionId === state.sessionId ? h(SessionProvider, { session: reference }, renderSlot('ayuan.conversation', {})) : h('p', null, '正在连接阿源…')),
+          } }) : reference?.sessionId === state.sessionId ? h(SessionProvider, { session: reference }, renderSlot('ayuan.conversation', { onSend: sendDraftMessage })) : h('p', null, '正在连接阿源…')),
           h('footer', { className: 'ay-yuan-float-foot' }, '拖动标题栏移动 · 右下角缩放'),
           h('button', { className: 'ay-yuan-resize', 'aria-label': '调整浮框大小', title: '拖动调整大小；方向键微调',
             onPointerDown: e => { e.preventDefault(); e.currentTarget.focus(); sizing.current = { startX: e.clientX, startY: e.clientY, ...layout }; e.currentTarget.setPointerCapture(e.pointerId); },
@@ -801,7 +915,7 @@ window.__ModuleLoader__.load({
         h('button', { type: 'button', className: 'ay-yuan-entry', disabled: busy,
           title: '打开阿源 · 携带当前位置', 'aria-label': '打开阿源 · 携带当前位置',
           onPointerDown: () => { snapshot.current = captureOrigin(props); },
-          onClick: async () => { setBusy(true); setError(''); try { await openYuan({ origin: snapshot.current || captureOrigin(props) }); }
+          onClick: async () => { setBusy(true); setError(''); try { await openYuan({ draft: true, origin: snapshot.current || captureOrigin(props) }); }
             catch (e) { setError(e.message); } finally { snapshot.current = null; setBusy(false); } } }, h(RobotIcon)),
         error ? h('span', { className: 'ay-native-error', role: 'alert', onClick: () => setError(''), title: '点击收起' }, error) : null);
     }
@@ -851,38 +965,94 @@ window.__ModuleLoader__.load({
       return minutes < 1 ? '刚刚' : minutes < 60 ? minutes + '分钟' : minutes < 1440 ? Math.floor(minutes / 60) + '小时' : Math.floor(minutes / 1440) + '天';
     }
 
-    function YuanHistoryRow({ row, navigate, renderSlot }) {
-      const menuState = useState(false);
-      const [menu, setMenu] = menuState;
-      const native = clientService('sessions')?.list?.getSnapshot?.()?.byId?.[row.id];
-      const title = native?.displayTitle || row.title;
-      const owner = { sessionId: row.id, displayTitle: title };
-      return h('div', { className: 'ay-history-item' + (menu ? ' is-menu-open' : '') },
-        h('button', { className: 'ay-history-row', onClick: () => navigate({ sessionId: row.id }), title },
-          h('span', { className: 'ay-history-title' }, title),
-          h('small', null, relativeTime(row.lastActiveAt || row.createdAt))),
-        h('span', { className: 'ay-history-native-actions' },
-          h(Menu, { open: menu, onClose: () => setMenu(false), portal: true,
-            anchor: h('button', { className: 'ay-history-more', 'aria-label': '会话操作', onClick: () => setMenu(!menu) }, h(IconEllipsisOutlineRegular)) },
-            renderSlot('ayuan.history.menu', owner, { hookContext: menuState })),
-          renderSlot('ayuan.history.actions', owner)));
+    /** 会话悬停卡片内容：标题、相对时间、宿主 sidebar.session.row.hover 扩展点、运行状态。 */
+    function YuanHistoryHover({ owner, title, time, native, renderSlot }) {
+      const running = native?.running === true;
+      const dot = StateDot ? h(StateDot, { state: running ? 'ongoing' : 'idle' }) : h('span', { className: 'ay-history-dot' });
+      return h('div', { className: 'ay-history-hover' },
+        h('div', { className: 'ay-history-hover-title' }, title),
+        time ? h('div', { className: 'ay-history-hover-time' }, time === '刚刚' ? '刚刚更新' : time + '前更新') : null,
+        h('div', { className: 'ay-history-hover-extra' }, renderSlot('ayuan.history.hover', owner)),
+        h('div', { className: 'ay-history-hover-status' }, dot, h('span', null, running ? '运行中' : '空闲')));
     }
 
-    // Reuse the host registrations (components, injected actions and locale).
-    // Separate child seats preserve the sidebar owner's slot authorization.
+    /**
+     * 仿照宿主左侧会话行：行骨架按原生度量（32px/14px/10px、悬停换成操作按钮），
+     * 前导装饰、菜单项、悬停按钮、悬停卡片扩展全部走宿主 slot 的镜像副本。
+     */
+    function YuanHistoryRow({ row, navigate, renderSlot }) {
+      const [menu, setMenu] = useState(false);
+      // hookContext 需要稳定身份；useState 每次返回新数组会让宿主菜单钩子反复重绑。
+      const menuState = useMemo(() => [menu, setMenu], [menu]);
+      const native = clientService('sessions')?.list?.getSnapshot?.()?.byId?.[row.id];
+      const title = native?.displayTitle || row.title || row.id;
+      const owner = { sessionId: row.id, displayTitle: title };
+      const time = relativeTime(native?.updatedAt || row.lastActiveAt || row.createdAt);
+      const open = () => navigate({ sessionId: row.id });
+      const leading = native?.running === true
+        ? (StateDot ? h(StateDot, { state: 'ongoing' }) : h('span', { className: 'ay-history-dot' }))
+        : renderSlot('ayuan.history.leading', owner);
+      const rowNode = h('div', {
+        className: 'ay-history-item' + (menu ? ' is-menu-open' : ''),
+        role: 'treeitem',
+        'aria-selected': false,
+        tabIndex: 0,
+        'data-row-key': 'session:' + row.id,
+        onClick: open,
+        onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } },
+      },
+        h('span', { className: 'ay-history-leading' }, leading),
+        h('span', { className: 'ay-history-title' }, title),
+        h('span', { className: 'ay-history-time' }, time),
+        h('span', { className: 'ay-history-native-actions', onClick: (event) => event.stopPropagation() },
+          h(Menu, {
+            open: menu,
+            onClose: () => setMenu(false),
+            portal: true,
+            closeOnPointerLeave: true,
+            anchor: h('button', {
+              type: 'button', className: 'ay-history-more', 'aria-label': '会话操作', 'aria-expanded': menu,
+              onClick: () => setMenu((value) => !value),
+            }, h(IconEllipsisOutlineRegular, {})),
+          }, renderSlot('ayuan.history.menu', owner, { hookContext: menuState })),
+          renderSlot('ayuan.history.actions', owner)));
+      if (!HoverCard) return rowNode;
+      return h(HoverCard, {
+        anchor: rowNode,
+        content: h(YuanHistoryHover, { owner, title, time, native, renderSlot }),
+        openDelayMs: 800,
+        grouped: true,
+        disabled: menu,
+        copyText: title,
+        copyLabel: '复制标题',
+        copiedLabel: '已复制',
+      });
+    }
+
+    // 复用宿主左侧会话行的公开扩展点：组件、注入动作和 locale 都按源 slot 原样镜像。
+    // 宿主或第三方插件往这些 slot 里新增条目时，阿源历史列表会跟着更新。
     function installNativeHistory(ctx) {
-      const pairs = [['sidebar.workspaces.session.menu.item', 'ayuan.history.menu'], ['sidebar.workspaces.session.row.action', 'ayuan.history.actions']];
-      return ctx.slots.inject(pairs[0][0], () => {
-        const factory = ctx.slots.registerFactory({ name: 'ayuan.history.row', scope: 'root', children: {
-          'ayuan.history.menu': { kind: 'list', scope: 'root', inject: ctx.slots.spec(pairs[0][0]).inject },
-          'ayuan.history.actions': { kind: 'list', scope: 'root' }
-        } }, YuanHistoryRow);
-        const cleanups = pairs.map(([source, target]) => {
+      const mirrors = [
+        ['sidebar.workspaces.session.menu.item', 'ayuan.history.menu'],
+        ['sidebar.workspaces.session.row.action', 'ayuan.history.actions'],
+        ['sidebar.session.row.leading', 'ayuan.history.leading'],
+        ['sidebar.session.row.hover', 'ayuan.history.hover'],
+      ];
+      return ctx.slots.inject(mirrors[0][0], () => {
+        const menuSpec = ctx.slots.spec(mirrors[0][0]);
+        const children = {
+          'ayuan.history.menu': menuSpec?.inject === undefined ? { kind: 'list', scope: 'root' } : { kind: 'list', scope: 'root', inject: menuSpec.inject },
+          'ayuan.history.actions': { kind: 'list', scope: 'root' },
+          'ayuan.history.leading': { kind: 'list', scope: 'root' },
+          'ayuan.history.hover': { kind: 'list', scope: 'root' },
+        };
+        const factory = ctx.slots.registerFactory({ name: 'ayuan.history.row', scope: 'root', children }, YuanHistoryRow);
+        const cleanups = mirrors.map(([source, target]) => {
           let registrations = [];
           const sync = () => {
             registrations.forEach(dispose => dispose());
             registrations = ctx.slots.entriesOfSlot(source).map((entry, index) => ctx.slots.register({
-              name: target, id: 'host-' + index, order: index, locale: entry.locale, inject: entry.inject
+              name: target, id: 'host-' + index, order: index, locale: entry.locale, inject: entry.inject,
             }, entry.component));
           };
           sync();
@@ -910,21 +1080,30 @@ window.__ModuleLoader__.load({
         return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close); };
       }, [panel]);
       const rows = clientService('sessions')?.list?.getSnapshot?.()?.byId || {};
-      const sessions = (store.state?.sessions || []).filter(s => rows[s.id]?.blank !== true && (rows[s.id] ? rows[s.id].blank === false : s.topicNamed === true));
+      // 顺序也按宿主左侧列表的习惯：最近更新的在前（宿主 pinned/手动排序没有公开给插件，暂不复制）。
+      const recency = (session) => {
+        const host = rows[session.id]?.updatedAt;
+        if (typeof host === 'number' && Number.isFinite(host)) return host;
+        const parsed = Date.parse(session.lastActiveAt || session.createdAt || '');
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const sessions = (store.state?.sessions || [])
+        .filter(s => rows[s.id]?.blank !== true && (rows[s.id] ? rows[s.id].blank === false : s.topicNamed === true))
+        .sort((a, b) => recency(b) - recency(a));
       if (!props.floating && !sessions.some((s) => s.id === props.sessionId)) return null;
       const context = store.state?.contextSessionId === props.sessionId ? store.state?.context : null;
       const navigate = async (options) => { setBusy(true); setError(''); try { await openYuan(options); setPanel(''); }
         catch(e) { setError(e.message); } finally { setBusy(false); } };
       return h('div', { className: 'ay-yuan-native', ref: root },
         !props.floating ? h('span', { className: 'ay-native-name' }, h(RobotIcon), '阿源') : null,
-        h('button', { className: 'ay-yuan-btn', disabled: busy, onClick: () => navigate({ newSession: true }) }, '新会话'),
+        h('button', { className: 'ay-yuan-btn', disabled: busy, onClick: () => navigate({ draft: true }) }, '新会话'),
         h('button', { className: 'ay-yuan-btn', style: { marginLeft: 'auto', order: 99 }, title: '查看阿源 status 快照', 'aria-label': '查看阿源 status 快照', onClick: async () => { try { const result = await apiJson('/ayuan/api/snapshot'); setSnapshot(result.snapshot); setPanel('快照'); } catch(e) { setError(e.message); } } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true }, h('rect', { x: 4, y: 3, width: 16, height: 18, rx: 3 }), h('path', { d: 'M8 8h8M8 12h5M8 16h8' }))),
         ['历史','记忆'].map((name) => h('button', { key: name, className: 'ay-yuan-btn', 'aria-expanded': panel === name, onClick: () => setPanel(panel === name ? '' : name) }, name)),
         context ? h('button', { className: 'ay-context-chip', onClick: () => setPanel(panel === '位置' ? '' : '位置'), title: '将在下一次发言时提供给阿源，10 分钟后过期' }, '来自 ' + (context.title || context.location)) : null,
         error ? h('span', { className: 'ay-native-error', role: 'alert' }, error) : null,
         panel ? h('section', { className: 'ay-native-popover ay-native-popover--' + (panel === '历史' ? 'history' : panel === '快照' ? 'snapshot' : 'default'), 'aria-label': '阿源' + panel },
           h('div', { className: 'ay-native-popover-head' }, h('strong', null, panel === '位置' ? '已携带的位置' : '阿源 · ' + panel), h('button', { className: 'ay-yuan-btn', onClick: () => setPanel(''), 'aria-label': '关闭阿源菜单' }, '×')),
-          panel === '历史' ? sessions.length ? sessions.map(s => h(React.Fragment, { key: s.id }, props.renderFactorySlot('ayuan.history.row', { row: s, navigate }))) : h('p', { className: 'ay-native-empty' }, '暂无历史会话，发送第一条消息后会显示在这里。') : null,
+          panel === '历史' ? sessions.length ? h('div', { className: 'ay-history-list', role: 'tree', 'aria-label': '阿源历史会话' }, sessions.map(s => h(React.Fragment, { key: s.id }, props.renderFactorySlot('ayuan.history.row', { row: s, navigate })))) : h('p', { className: 'ay-native-empty' }, '暂无历史会话，发送第一条消息后会显示在这里。') : null,
           panel === '快照' ? snapshot ? h('div', { className: 'ay-snapshot' },
             h('div', { className: 'ay-snapshot-status' }, h('span', { className: 'ay-snapshot-badge' + (snapshot.stale ? ' is-stale' : '') }, snapshot.stale ? '位置已过期' : '位置已同步'), h('span', null, relativeTime(snapshot.observedAt) + '更新')),
             h('div', { className: 'ay-snapshot-source' }, h('span', { className: 'ay-snapshot-eyebrow' }, snapshot.view.location || '当前界面'), h('h3', null, snapshot.view.title || '未命名界面'), h('span', { className: 'ay-snapshot-state' }, snapshot.view.running ? '会话运行中' : '会话空闲')),
@@ -1270,7 +1449,7 @@ window.__ModuleLoader__.load({
 
 
     /** 阿源自己的新会话着陆页；发出第一条消息后交回宿主原生 composer。 */
-    function AyLanding({ t, actions, onSubmitted, onSend, sameSession = false }) {
+    function AyLanding({ t, actions, onSubmitted, onSend, sameSession = false, welcomeOnly = false }) {
       const [text, setText] = useState('');
       const [failure, setFailure] = useState('');
       const [sending, setSending] = useState(false);
@@ -1290,14 +1469,15 @@ window.__ModuleLoader__.load({
         }
       };
       const chips = [t('landingChip1'), t('landingChip2'), t('landingChip3'), t('landingChip4')];
-      return h('div', { className: 'ay-landing' },
+      const showChips = !sameSession && (onSend !== undefined || actions !== undefined);
+      return h('div', { className: 'ay-landing' + (welcomeOnly ? ' ay-landing--native' : '') },
         h('div', { className: 'ay-landing__mark' }, h(RobotIcon)),
         h('h2', { className: 'ay-landing__title' }, sameSession ? '当前对话在主界面显示' : t('landingTitle')),
         h('p', { className: 'ay-landing__body' }, sameSession ? '你可以在这里继续发送，回复会显示在主界面。' : t('landingBody')),
-        !sameSession ? h('div', { className: 'ay-landing__chips' }, chips.map((chip, index) => h('button', {
+        showChips ? h('div', { className: 'ay-landing__chips' }, chips.map((chip, index) => h('button', {
           key: 'chip-' + index, type: 'button', className: 'ay-landing__chip', onClick: () => send(chip),
         }, chip))) : null,
-        h('div', { className: 'ay-landing__composer' },
+        welcomeOnly ? null : h('div', { className: 'ay-landing__composer' },
           h('textarea', {
             className: 'ay-landing__input', rows: 2, value: text, placeholder: t('landingPlaceholder'), 'aria-label': t('landingPlaceholder'),
             onChange: (event) => setText(event.target.value),
@@ -1305,7 +1485,7 @@ window.__ModuleLoader__.load({
           }),
           h('button', { type: 'button', className: 'ay-landing__send', disabled: sending || text.trim() === '', onClick: () => send() }, t('landingSend'))),
         failure !== '' ? h('p', { className: 'ay-landing__error', role: 'alert' }, failure) : null,
-        h('p', { className: 'ay-landing__hint' }, sameSession ? 'Enter 发送 · Shift+Enter 换行' : t('landingHint')));
+        welcomeOnly ? null : h('p', { className: 'ay-landing__hint' }, sameSession ? 'Enter 发送 · Shift+Enter 换行' : t('landingHint')));
     }
 
     function describeError(error) {
@@ -1561,14 +1741,10 @@ window.__ModuleLoader__.load({
 .ay-native-hint{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary);margin:6px 0 14px}
 .ay-native-error{position:absolute;z-index:1001;right:0;top:38px;width:280px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.5;white-space:normal;box-shadow:0 8px 24px #0002}
 .ay-native-empty{padding:30px 8px;text-align:center;color:var(--dsw-alias-label-tertiary)}
-.ay-history-row{display:flex;justify-content:space-between;gap:14px;align-items:center;width:100%;padding:12px 8px;background:transparent;color:inherit;border:0;border-bottom:1px solid var(--dsw-alias-border-l1);text-align:left;cursor:pointer;font:inherit}
-.ay-history-row:hover{background:var(--dsw-alias-bg-layer-1)}
-.ay-history-row small{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:none}
 .ay-memory-row{padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l1);overflow-wrap:anywhere}
 .ay-memory-row p{margin:8px 0;white-space:pre-wrap;line-height:1.65}
 .ay-memory-row details{font-size:12px;color:var(--dsw-alias-label-secondary);margin:8px 0}
 .ay-memory-row summary{cursor:pointer}
-.ay-history-item{display:flex;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--dsw-alias-border-l1)}.ay-history-item>.ay-history-row{flex:1;min-width:0;border:0}.ay-history-actions{width:100%;display:flex;flex-wrap:wrap;gap:4px;padding:6px}.ay-history-actions form{display:flex;width:100%;gap:4px}.ay-history-actions input{min-width:0;flex:1;background:var(--dsw-alias-bg-base);color:inherit;border:1px solid var(--dsw-alias-border-l2)}
 .ay-memory-row blockquote{margin:8px 0;padding:8px 12px;border-left:2px solid var(--dsw-alias-border-l2);white-space:pre-wrap}
 .ay-memory-edit{width:100%;min-height:90px;resize:vertical;font:inherit;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);color:inherit}
 .ay-search__input{height:36px;border-radius:8px}
@@ -1589,9 +1765,9 @@ window.__ModuleLoader__.load({
 .ay-yuan-float-identity strong{font-size:16px}.ay-yuan-float-identity span{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ay-yuan-float>.ay-yuan-native{padding:0 12px 10px;border:0;border-bottom:1px solid var(--dsw-alias-border-l1);border-radius:0;cursor:default;flex:none;background:transparent}
 .ay-header-icon{width:30px;padding:0;min-height:28px}
-.ay-settings{position:absolute;z-index:1002;right:12px;top:48px;width:260px;box-sizing:border-box;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px #0002;font-size:12px}.ay-settings-head{display:flex;align-items:center;justify-content:space-between}.ay-settings p{color:var(--dsw-alias-label-secondary);margin:12px 0 5px}.ay-settings label{display:flex;justify-content:space-between;align-items:center;padding:7px 0}.ay-settings select{font:inherit;color:inherit;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:5px;padding:4px}.ay-settings small{display:block;color:var(--dsw-alias-label-tertiary);margin-top:8px}
+.ay-settings{position:absolute;z-index:1002;right:12px;top:48px;width:260px;box-sizing:border-box;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-base);box-shadow:0 8px 24px #0002;font-size:12px}.ay-settings-head{display:flex;align-items:center;justify-content:space-between}.ay-settings p{color:var(--dsw-alias-label-secondary);margin:12px 0 5px}.ay-settings label{display:flex;justify-content:space-between;align-items:center;padding:7px 0}.ay-settings select{font:inherit;color:inherit;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:5px;padding:4px}.ay-settings small{display:block;color:var(--dsw-alias-label-tertiary);margin-top:8px}.ay-settings-preview{display:flex;flex-direction:column;gap:6px;margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);line-height:1.45}.ay-settings-preview span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ay-yuan-float-body{--dsh-content-font-size:var(--ay-interface-font);--dsh-content-font-delta:var(--ay-interface-delta);font-size:var(--ay-interface-font);flex:1;min-height:0;display:flex;flex-direction:column;position:relative;overflow:hidden}
-.ay-yuan-float-body .hWmORq_root{--dsh-content-font-size:var(--ay-reply-font);--dsh-content-font-delta:var(--ay-reply-delta);font-size:var(--ay-reply-font)}
+.ay-yuan-float-body [data-chat-flow]{--dsh-content-font-size:var(--ay-reply-font);--dsh-content-font-delta:var(--ay-reply-delta);font-size:var(--ay-reply-font)}
 .ay-yuan-float-body>[data-conversation-content]{flex:1;min-height:0;--dsh-chat-user-width:100%;--dsh-chat-content-padding:16px}
 .ay-yuan-float .ay-native-popover{position:absolute;top:92px;right:12px;max-height:calc(100% - 110px);max-width:calc(100% - 24px);z-index:10}
 .ay-yuan-bubble{position:fixed;right:24px;bottom:24px;pointer-events:auto;display:flex;align-items:center;gap:8px;padding:12px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 6px 24px #0002;cursor:grab;touch-action:none;user-select:none;z-index:120}
@@ -1614,27 +1790,37 @@ window.__ModuleLoader__.load({
 .ay-landing__send:disabled{opacity:.45;cursor:default}
 .ay-landing__error{margin:0;font-size:12px;color:var(--dsw-alias-state-error-primary)}
 .ay-landing__hint{margin:0;font-size:10px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.ay-landing--native{justify-content:center;padding-bottom:8px}
 
 .ay-yuan-bubble{width:42px;height:42px;justify-content:center;padding:3px;gap:0;border-radius:50%;box-shadow:0 3px 14px #00000014;line-height:1}
 .ay-yuan-bubble .ay-yuan-whale{width:30px;height:30px}
-.ay-native-popover--history{padding:12px;width:370px}
-.ay-native-popover--history .ay-native-popover-head{padding:2px 4px 8px;margin-bottom:4px}
-.ay-history-item{position:relative;display:flex;flex-wrap:nowrap;border:0;border-radius:7px;min-height:32px;margin:2px 0;padding-right:4px}
-.ay-history-item:hover,.ay-history-item:focus-within,.ay-history-item.is-menu-open{background:var(--dsw-alias-bg-layer-1)}
-.ay-history-item.is-menu-open{z-index:2;flex-wrap:nowrap}
-.ay-history-item>.ay-history-row{padding:6px 8px 6px 12px;gap:12px;min-width:0;background:transparent;border-radius:7px;font-size:13px}
-.ay-history-native-actions{display:flex;align-items:center;flex:none;gap:2px}
-.ay-history-native-actions>button{display:none}
-.ay-history-item:hover .ay-history-native-actions>button,.ay-history-item:focus-within .ay-history-native-actions>button{display:inline-flex}
-.ay-history-title{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
-.ay-history-more{border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-secondary);width:26px;height:26px;cursor:pointer;opacity:0;font:inherit;font-size:18px;flex:none}
-.ay-history-item:hover .ay-history-more,.ay-history-item:focus-within .ay-history-more,.ay-history-item.is-menu-open .ay-history-more{opacity:1}
-.ay-history-more:hover{background:var(--dsw-alias-bg-layer-2)}
-.ay-history-actions{margin:0 5px 6px auto;width:190px;display:flex;flex-direction:column;align-items:stretch;gap:2px;padding:5px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-base);box-shadow:0 4px 12px #0000000a}
-.ay-history-actions>.ay-yuan-btn{border:0;background:transparent;text-align:left;padding:6px 9px;border-radius:5px}
-.ay-history-actions>.ay-yuan-btn:hover{background:var(--dsw-alias-bg-layer-1)}
-.ay-history-actions form{flex-wrap:wrap;padding:4px;gap:4px}
-.ay-history-actions input{flex-basis:100%;width:100%;padding:5px;border-radius:4px}
+/* 阿源历史列表：按宿主左侧会话行的结构仿制；字号和对比度按浮框可读性略放大。 */
+.ay-native-popover--history{padding:12px 10px 10px;width:420px;font-size:14px}
+.ay-native-popover--history .ay-native-popover-head{padding:0 6px 10px;margin-bottom:2px;font-size:15px}
+.ay-history-list{display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - 260px);overflow:auto;margin:0 -2px;padding:0 2px}
+.ay-history-item{display:flex;align-items:center;min-height:36px;padding:0 10px;border-radius:var(--dsw-radius-md);cursor:pointer;color:var(--dsw-alias-label-primary);user-select:none;outline:none}
+.ay-history-item:hover,.ay-history-item.is-menu-open{background:var(--dsw-alias-interactive-bg-hover)}
+.ay-history-item:focus-visible{outline:2px solid var(--dsw-focus-ring-color);outline-offset:-2px}
+.ay-history-leading{width:18px;height:22px;flex:none;display:inline-flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary)}
+.ay-history-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}
+.ay-history-title{flex:1 1 auto;min-width:0;margin:0 8px 0 4px;font-size:15px;line-height:22px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ay-history-time{flex:none;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:18px}
+.ay-history-item:hover .ay-history-time,.ay-history-item.is-menu-open .ay-history-time{display:none}
+.ay-history-native-actions{flex:none;display:none;align-items:center;gap:14px;margin-left:auto}
+.ay-history-item:hover .ay-history-native-actions,.ay-history-item:focus-within .ay-history-native-actions,.ay-history-item.is-menu-open .ay-history-native-actions{display:inline-flex}
+.ay-history-native-actions button{color:var(--dsw-alias-label-secondary);padding:2px;border-radius:var(--dsw-radius-xs);display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;cursor:pointer}
+.ay-history-native-actions button:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.ay-history-native-actions svg{width:18px;height:18px}
+.ay-history-more{width:20px;height:20px;padding:0;border:0;border-radius:var(--dsw-radius-xs);background:transparent;color:var(--dsw-alias-label-secondary);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex:none}
+.ay-history-more:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.ay-history-more svg{width:18px;height:18px}
+.ay-history-hover{min-width:240px;max-width:320px;padding:2px 0}
+.ay-history-hover-title{color:#fff;font-size:14px;font-weight:500;line-height:20px;overflow-wrap:anywhere}
+.ay-history-hover-time{margin-top:4px;color:#cfd3d6;font-size:12px;line-height:16px}
+.ay-history-hover-extra{color:#cfd3d6;font-size:12px;line-height:18px}
+.ay-history-hover-extra:not(:empty){margin-top:8px}
+.ay-history-hover-status{display:flex;align-items:center;gap:8px;margin-top:8px;color:#adb2b8;font-size:12px;line-height:20px}
+@media(hover:none){.ay-history-time{display:none}.ay-history-native-actions{display:inline-flex}}
 .ay-native-popover--snapshot{width:380px;padding:16px}
 .ay-snapshot-status{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--dsw-alias-label-tertiary);margin:2px 0 12px}
 .ay-snapshot-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:20px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary)}
@@ -1650,7 +1836,6 @@ window.__ModuleLoader__.load({
 .ay-snapshot-id button{flex:none}
 .ay-snapshot-footnote{font-size:11px;color:var(--dsw-alias-label-tertiary);margin:12px 0 4px}
 .ay-snapshot .ay-native-hint{margin:0;font-size:11px}
-@media(hover:none){.ay-history-more{opacity:1}}
 
 `;
 
