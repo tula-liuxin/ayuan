@@ -704,15 +704,24 @@ window.__ModuleLoader__.load({
     const BUBBLE_POSITION_KEY = 'ayuan.bubble-position.v2';
     const clampUnit = n => Math.max(0, Math.min(1, Number(n) || 0));
     function bubbleSize() { return window.matchMedia?.('(pointer:coarse)').matches ? 44 : 42; }
+    // 触屏没有 hover 语义：dock 的「滑出展开 / 滑回收起」只在鼠标可 hover 的设备上做。
+    // 手机上做这个动作 = 图标自己从手指下滑走 30px，再在 0.6s 后滑回，造成持续闪烁且点不中。
+    function hoverable() { try { return window.matchMedia?.('(hover: hover) and (pointer: fine)').matches === true } catch { return false } }
     function savedBubble(position, snap=false) {
-      const size=bubbleSize(),x=Math.max(0,Math.min(position.x,innerWidth-size)),y=Math.max(40,Math.min(position.y,innerHeight-size-8));
-      return {rx:clampUnit((x-8)/Math.max(1,innerWidth-size-16)),ry:clampUnit((y-40)/Math.max(1,innerHeight-size-48)),dock:snap?(x<28?'left':x>innerWidth-size-28?'right':null):null};
+      const size=bubbleSize(),x=Math.max(0,Math.min(position.x,innerWidth-size)),rawY=Math.max(40,Math.min(position.y,innerHeight-size-8));
+      const dock=snap?(x<28?'left':x>innerWidth-size-28?'right':null):null;
+      // 贴边竖排时电话在 anchor.y - 2*50，给整列留出顶部空间，避免贴顶时电话/闪电夹到同一个点。
+      const y=dock?Math.max(108,rawY):rawY;
+      return {rx:clampUnit((x-8)/Math.max(1,innerWidth-size-16)),ry:clampUnit((y-40)/Math.max(1,innerHeight-size-48)),dock};
     }
     function readBubblePosition() { try { const p=JSON.parse(localStorage.getItem(BUBBLE_POSITION_KEY));if(Number.isFinite(p?.rx)&&Number.isFinite(p?.ry))return p;const old=JSON.parse(localStorage.getItem('ayuan.bubble-position.v1'));return Number.isFinite(old?.x)&&Number.isFinite(old?.y)?savedBubble(old):null } catch {return null} }
     function projectBubble(position, expanded=false) {
       const size=bubbleSize(),p=position||{rx:1,ry:1},dock=['left','right'].includes(p.dock)?p.dock:null;
-      const y=Math.max(40,Math.min(innerHeight-size-8,40+clampUnit(p.ry)*Math.max(1,innerHeight-size-48)));
-      const x=dock==='left'?(expanded?8:-size/2):dock==='right'?(expanded?innerWidth-size-8:innerWidth-size/2):position?8+clampUnit(p.rx)*Math.max(0,innerWidth-size-16):innerWidth-size-24;
+      const yRaw=Math.max(40,Math.min(innerHeight-size-8,40+clampUnit(p.ry)*Math.max(1,innerHeight-size-48)));
+      const y=dock?Math.max(108,yRaw):yRaw;
+      // 触屏不做「半隐藏」：dock 收起时也整颗露出。
+      const shift=(expanded||!hoverable())?0:8+size/2;
+      const x=dock==='left'?8-shift:dock==='right'?innerWidth-size-8+shift:position?8+clampUnit(p.rx)*Math.max(0,innerWidth-size-16):innerWidth-size-24;
       return {x,y:position?y:innerHeight-size-24,width:size,height:size,dock,expanded};
     }
 
@@ -763,12 +772,15 @@ window.__ModuleLoader__.load({
       const [geometry, setGeometry] = useState(readFloatLayout), [wide, setWide] = useState(false), [, setViewport] = useState(0);
       const [bubblePos, setBubblePos] = useState(readBubblePosition);
       const [dockExpanded,setDockExpanded]=useState(false), dockTimer=useRef();
-      const revealDock = () => { clearTimeout(dockTimer.current);setDockExpanded(true); };
-      const hideDock = () => { clearTimeout(dockTimer.current);dockTimer.current=setTimeout(()=>setDockExpanded(false),600); };
+      // 拖动中间态粘住上一帧的 dock：否则整列会在拖动途中从「竖排」切到「一排」，另两个插件各跳约 100px。
+      const dragDock=useRef(null), bubblePosRef=useRef(bubblePos);
+      bubblePosRef.current=bubblePos;
+      const revealDock = () => { if(!hoverable())return; clearTimeout(dockTimer.current);setDockExpanded(true); };
+      const hideDock = () => { if(!hoverable())return; clearTimeout(dockTimer.current);dockTimer.current=setTimeout(()=>setDockExpanded(false),600); };
       const bubblePoint=projectBubble(bubblePos,dockExpanded);
-      useEffect(()=>{const reveal=e=>e.detail?.active?revealDock():hideDock();const move=e=>{const p=e.detail;if(Number.isFinite(p?.x)&&Number.isFinite(p?.y))setBubblePos(savedBubble(p,!!p.end));};window.addEventListener('leo-quick:dock-reveal-v1',reveal);window.addEventListener('leo-quick:launcher-move-v1',move);return()=>{clearTimeout(dockTimer.current);window.removeEventListener('leo-quick:dock-reveal-v1',reveal);window.removeEventListener('leo-quick:launcher-move-v1',move);};},[]);
+      useEffect(()=>{const reveal=e=>e.detail?.active?revealDock():hideDock();const move=e=>{const p=e.detail;if(!Number.isFinite(p?.x)||!Number.isFinite(p?.y))return;if(p.end)dragDock.current=null;else if(dragDock.current===null)dragDock.current=bubblePosRef.current?.dock||'';setBubblePos(savedBubble(p,!!p.end));};window.addEventListener('leo-quick:dock-reveal-v1',reveal);window.addEventListener('leo-quick:launcher-move-v1',move);return()=>{clearTimeout(dockTimer.current);window.removeEventListener('leo-quick:dock-reveal-v1',reveal);window.removeEventListener('leo-quick:launcher-move-v1',move);};},[]);
       useEffect(() => {
-        const publish = () => { const p = projectBubble(bubblePos,dockExpanded); window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', { detail: { visible: true, panelOpen: !!state.visible, ...p } })); };
+        const publish = () => { const p = projectBubble(bubblePos,dockExpanded); const dock = p.dock || (dragDock.current || null); window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', { detail: { visible: true, panelOpen: !!state.visible, ...p, dock } })); };
         window.addEventListener('leo-quick:anchor-request-v1', publish); window.addEventListener('resize', publish); publish();
         return () => { window.removeEventListener('leo-quick:anchor-request-v1', publish); window.removeEventListener('resize', publish); };
       }, [bubblePos, state.visible, dockExpanded]);
@@ -1757,6 +1769,7 @@ window.__ModuleLoader__.load({
 .ay-yuan-float-foot{flex:none;height:28px;padding:5px 40px 5px 16px;font-size:10px;color:var(--dsw-alias-label-tertiary);box-sizing:border-box}
 .ay-yuan-whale{flex:none;transition:transform .18s}.ay-yuan-entry:hover .ay-yuan-whale,.ay-yuan-bubble:hover .ay-yuan-whale{transform:translateY(-2px) rotate(-7deg)}
 @media(prefers-reduced-motion:reduce){.ay-yuan-whale{transition:none}.ay-yuan-entry:hover .ay-yuan-whale,.ay-yuan-bubble:hover .ay-yuan-whale{transform:none}}
+@media(hover:none){.ay-yuan-entry:hover .ay-yuan-whale,.ay-yuan-bubble:hover .ay-yuan-whale{transform:none}}
 .ay-yuan-view-tabs{display:flex;gap:20px;padding:8px 18px 0;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);position:sticky;top:0;z-index:3}
 .ay-yuan-view-tabs button{font:inherit;font-size:13px;padding:6px 0;border:0;border-bottom:2px solid transparent;color:var(--dsw-alias-label-secondary);background:transparent;cursor:pointer}
 .ay-yuan-view-tabs button[aria-selected=true]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
