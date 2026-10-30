@@ -1,6 +1,6 @@
 {
   "name": "ayuan",
-  "version": "2.0.8",
+  "version": "2.0.9",
   "private": false,
   "type": "module",
   "description": "阿源：跨设备共享记忆与状态的 DSH 助手。独立浮框、真实 Agent 会话、可追溯记忆和有来源的页面上下文。",

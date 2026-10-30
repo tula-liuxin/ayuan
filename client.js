@@ -768,7 +768,7 @@ window.__ModuleLoader__.load({
       const bubblePoint=projectBubble(bubblePos,dockExpanded);
       useEffect(()=>{const reveal=e=>e.detail?.active?revealDock():hideDock();const move=e=>{const p=e.detail;if(Number.isFinite(p?.x)&&Number.isFinite(p?.y))setBubblePos(savedBubble(p,!!p.end));};window.addEventListener('leo-quick:dock-reveal-v1',reveal);window.addEventListener('leo-quick:launcher-move-v1',move);return()=>{clearTimeout(dockTimer.current);window.removeEventListener('leo-quick:dock-reveal-v1',reveal);window.removeEventListener('leo-quick:launcher-move-v1',move);};},[]);
       useEffect(() => {
-        const publish = () => { const p = projectBubble(bubblePos,dockExpanded); window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', { detail: { visible: !state.visible, panelOpen: !!state.visible, ...p } })); };
+        const publish = () => { const p = projectBubble(bubblePos,dockExpanded); window.dispatchEvent(new CustomEvent('ayuan:launcher-anchor-v1', { detail: { visible: true, panelOpen: !!state.visible, ...p } })); };
         window.addEventListener('leo-quick:anchor-request-v1', publish); window.addEventListener('resize', publish); publish();
         return () => { window.removeEventListener('leo-quick:anchor-request-v1', publish); window.removeEventListener('resize', publish); };
       }, [bubblePos, state.visible, dockExpanded]);
@@ -1770,7 +1770,7 @@ window.__ModuleLoader__.load({
 .ay-yuan-float-body [data-chat-flow]{--dsh-content-font-size:var(--ay-reply-font);--dsh-content-font-delta:var(--ay-reply-delta);font-size:var(--ay-reply-font)}
 .ay-yuan-float-body>[data-conversation-content]{flex:1;min-height:0;--dsh-chat-user-width:100%;--dsh-chat-content-padding:16px}
 .ay-yuan-float .ay-native-popover{position:absolute;top:92px;right:12px;max-height:calc(100% - 110px);max-width:calc(100% - 24px);z-index:10}
-.ay-yuan-bubble{position:fixed;right:24px;bottom:24px;pointer-events:auto;display:flex;align-items:center;gap:8px;padding:12px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 6px 24px #0002;cursor:grab;touch-action:none;user-select:none;z-index:120}
+.ay-yuan-bubble{position:fixed;right:24px;bottom:24px;pointer-events:auto;display:flex;align-items:center;gap:8px;padding:12px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);box-shadow:0 6px 24px #0002;cursor:grab;touch-action:none;user-select:none;z-index:121}
 .ay-yuan-bubble:active{cursor:grabbing}
 .ay-yuan-float-head:active{cursor:grabbing}
 
