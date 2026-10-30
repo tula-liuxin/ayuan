@@ -840,7 +840,7 @@ window.__ModuleLoader__.load({
         if (state.sessionId) void openYuan({ sessionId: state.sessionId, origin }).catch(e => setError(e.message));
       };
       return h(React.Fragment, null,
-        !state.visible ? h('button', {
+        h('button', {
           type: 'button', className: 'ay-yuan-bubble', title: '展开阿源（可拖动）', 'aria-label': '展开阿源',
           style: { left: bubblePoint.x, top: bubblePoint.y, width:bubblePoint.width,height:bubblePoint.height, right: 'auto', bottom: 'auto' },
           onPointerEnter:revealDock,onPointerLeave:hideDock,onFocus:revealDock,onBlur:hideDock,
@@ -867,7 +867,7 @@ window.__ModuleLoader__.load({
             if (suppressBubbleClick.current) { suppressBubbleClick.current = false; return; }
             void begin();
           },
-        }, h(RobotIcon)) : null,
+        }, h(RobotIcon)),
         h('section', { ref: panel, className: 'ay-yuan-float' + (wide ? ' ay-yuan-float-wide' : ''), role: 'dialog', 'aria-modal': false, 'aria-label': '阿源浮框',
           style: { display: state.visible ? 'flex' : 'none', left: layout.x, top: layout.y, width: layout.width, height: layout.height, right: 'auto', bottom: 'auto', maxWidth: 'none', maxHeight: 'none' },
           onKeyDown: e => { if (e.key === 'Escape' && !e.defaultPrevented) { if (settingsOpen) setSettingsOpen(false); else floating.set({ visible: false }); e.stopPropagation(); } } },
